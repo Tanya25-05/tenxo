@@ -1,0 +1,17 @@
+version: "3.9"
+services:
+  nats:
+    image: nats:2.10.3
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - ./configs/nats.conf:/etc/nats/nats-server.conf:ro
+      - ./jetstream:/data
+    command: ["-c", "/etc/nats/nats-server.conf"]
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    restart: unless-stopped

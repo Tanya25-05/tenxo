@@ -1,0 +1,17 @@
+[package]
+name = "edge_agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zip = "0.6"
+nats = "0.11"
+reqwest = { version = "0.11", features = ["blocking", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.21"
+aes-gcm = "0.10"
+rand = "0.8"
+tempfile = "3.6"
+anyhow = "1.0"
+hostname = "0.4"

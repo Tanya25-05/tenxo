@@ -1,0 +1,15 @@
+.DS_Store
+*.log
+jetstream/
+.env
+.env.local
+.env.*
+.venv/
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+uploads/
+backend/*.exe
+edge_agent/target/
+CODEBASE_DOCUMENTATION.pdf
