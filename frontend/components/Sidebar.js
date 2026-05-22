@@ -12,11 +12,21 @@ import { useRouter } from "next/router";
 
 const navItems = [
   { name: "Compute", icon: Cpu, path: "/app/developer", scope: "developer" },
-  { name: "API & Billing", icon: CreditCard, path: "/app/developer", tab: "billing", scope: "developer" },
+  {
+    name: "API & Billing",
+    icon: CreditCard,
+    path: "/app/developer",
+    tab: "billing",
+    scope: "developer",
+  },
   { name: "Hardware", icon: Server, path: "/app/provider", scope: "provider" },
 ];
 
-export default function Sidebar({ active = "Compute", role = "developer", onSelect }) {
+export default function Sidebar({
+  active = "Compute",
+  role = "developer",
+  onSelect,
+}) {
   const router = useRouter();
   const visibleItems = navItems.filter((item) => item.scope === role);
 
@@ -40,7 +50,9 @@ export default function Sidebar({ active = "Compute", role = "developer", onSele
           <Network size={18} />
         </div>
         <div>
-          <div className="text-sm font-semibold tracking-[0.24em] text-white">TENXO</div>
+          <div className="text-sm font-semibold tracking-[0.24em] text-white">
+            TENXO
+          </div>
           <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-soft)]">
             Compute Grid
           </div>
@@ -53,7 +65,7 @@ export default function Sidebar({ active = "Compute", role = "developer", onSele
           <span className="text-xs font-medium">Secure relay active</span>
         </div>
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/5">
-          <div className="h-full w-3/4 rounded-full bg-[linear-gradient(90deg,#35f0a0,#68a9ff)]" />
+          <div className="h-full w-3/4 rounded-full bg-white/40" />
         </div>
       </div>
 
@@ -75,10 +87,13 @@ export default function Sidebar({ active = "Compute", role = "developer", onSele
 
       <div className="px-3 pb-4">
         <div className="tenxo-mini-card mb-3">
-          <KeyRound size={15} className="text-[var(--accent-blue)]" />
+          <KeyRound size={15} className="text-[var(--text-muted)]" />
           <span>Zero-trust worker auth</span>
         </div>
-        <button onClick={handleSignOut} className="tenxo-nav-item text-[var(--text-soft)]">
+        <button
+          onClick={handleSignOut}
+          className="tenxo-nav-item text-[var(--text-soft)]"
+        >
           <LogOut size={17} />
           <span>Sign out</span>
         </button>

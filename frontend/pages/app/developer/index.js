@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Activity,
   ArrowUpRight,
+  Clock3,
   Cpu,
   CreditCard,
+  Gauge,
   KeyRound,
   Layers3,
   Play,
@@ -15,6 +16,30 @@ import { useRequireSession } from "../../../lib/useRequireSession";
 import AppShell from "../../../components/AppShell";
 import MetricCard from "../../../components/MetricCard";
 
+const gpuTiers = [
+  {
+    id: "rtx-4090",
+    name: "RTX 4090",
+    memory: "24 GB",
+    useCase: "Fine-tuning, inference",
+    price: 0.15,
+  },
+  {
+    id: "a5000",
+    name: "RTX A5000",
+    memory: "24 GB",
+    useCase: "Stable training runs",
+    price: 0.22,
+  },
+  {
+    id: "a100",
+    name: "A100",
+    memory: "40 GB",
+    useCase: "Large model training",
+    price: 0.75,
+  },
+];
+
 export default function DeveloperDashboard() {
   const { checkingAuth, session } = useRequireSession();
   const [activeTab, setActiveTab] = useState("pods");
@@ -23,6 +48,9 @@ export default function DeveloperDashboard() {
   const [networkNodes, setNetworkNodes] = useState([]);
   const [loadingNetwork, setLoadingNetwork] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [selectedGpuId, setSelectedGpuId] = useState(gpuTiers[0].id);
+  const [meterRunning, setMeterRunning] = useState(false);
+  const [meterSeconds, setMeterSeconds] = useState(0);
 
   useEffect(() => {
     if (!session?.access_token) return;
@@ -43,6 +71,14 @@ export default function DeveloperDashboard() {
     fetchPods();
   }, []);
 
+  useEffect(() => {
+    if (!meterRunning) return undefined;
+    const timer = setInterval(() => {
+      setMeterSeconds((seconds) => seconds + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [meterRunning]);
+
   const fetchNetworkStatus = async (token) => {
     try {
       const res = await fetch("http://localhost:8080/nodes", {
@@ -61,6 +97,20 @@ export default function DeveloperDashboard() {
     () => (networkNodes.length * 0.15).toFixed(2),
     [networkNodes.length]
   );
+  const selectedGpu = useMemo(
+    () => gpuTiers.find((tier) => tier.id === selectedGpuId) || gpuTiers[0],
+    [selectedGpuId]
+  );
+  const meteredCost = useMemo(
+    () => ((meterSeconds / 3600) * selectedGpu.price).toFixed(4),
+    [meterSeconds, selectedGpu.price]
+  );
+  const meterTime = useMemo(() => {
+    const hours = Math.floor(meterSeconds / 3600);
+    const minutes = Math.floor((meterSeconds % 3600) / 60);
+    const seconds = meterSeconds % 60;
+    return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
+  }, [meterSeconds]);
 
   const handleCopyToken = () => {
     navigator.clipboard.writeText(session.access_token);
@@ -114,6 +164,73 @@ export default function DeveloperDashboard() {
               label="Grid Cost / Hr"
               value={`$${estimatedHourly}`}
             />
+          </section>
+
+          <section className="tenxo-card overflow-hidden">
+            <div className="flex flex-col gap-4 border-b border-[var(--border-muted)] p-5 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="tenxo-eyebrow">Pay as you go</p>
+                <h2 className="text-xl font-semibold text-white">Choose compute and meter usage</h2>
+                <p className="mt-1 text-sm text-[var(--text-muted)]">
+                  Select the GPU class for a workload. Runtime is tracked by the second and priced hourly.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className={meterRunning ? "tenxo-btn-secondary" : "tenxo-btn-primary"}
+                  onClick={() => setMeterRunning((running) => !running)}
+                >
+                  <Clock3 size={16} />
+                  {meterRunning ? "Pause meter" : "Start meter"}
+                </button>
+                <button
+                  className="tenxo-btn-ghost"
+                  onClick={() => {
+                    setMeterRunning(false);
+                    setMeterSeconds(0);
+                  }}
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+
+            <div className="grid gap-0 lg:grid-cols-[1.25fr_0.75fr]">
+              <div className="grid gap-3 border-b border-[var(--border-muted)] p-5 lg:border-b-0 lg:border-r">
+                {gpuTiers.map((tier) => (
+                  <button
+                    key={tier.id}
+                    onClick={() => setSelectedGpuId(tier.id)}
+                    className={`gpu-tier-card ${selectedGpuId === tier.id ? "gpu-tier-card-active" : ""}`}
+                  >
+                    <span>
+                      <strong>{tier.name}</strong>
+                      <small>{tier.memory} VRAM · {tier.useCase}</small>
+                    </span>
+                    <span>${tier.price.toFixed(2)}/hr</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="usage-meter-panel">
+                <div>
+                  <p className="tenxo-eyebrow">Current meter</p>
+                  <h3>{selectedGpu.name}</h3>
+                </div>
+                <div className="usage-meter-readout">
+                  <Clock3 size={18} />
+                  <span>{meterTime}</span>
+                </div>
+                <div className="usage-meter-cost">
+                  <span>Estimated charge</span>
+                  <strong>${meteredCost}</strong>
+                </div>
+                <div className="usage-meter-note">
+                  <Gauge size={16} />
+                  <span>Charges scale with active runtime. Production billing should be backed by server-side pod events.</span>
+                </div>
+              </div>
+            </div>
           </section>
 
           <section className="tenxo-card overflow-hidden">

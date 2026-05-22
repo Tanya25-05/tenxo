@@ -16,7 +16,8 @@ import {
   Terminal,
   Zap,
 } from "lucide-react";
-import MarketingNav from "../components/MarketingNav";
+// MarketingNav and MarketingFooter are now provided by the global app shell
+import ArchitectureWorkflow from "../components/ArchitectureWorkflow";
 
 export default function LandingPage() {
   const [session, setSession] = useState(null);
@@ -29,7 +30,9 @@ export default function LandingPage() {
       setSession(session);
       setCheckingAuth(false);
     });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_e, session) => {
       setSession(session);
       setCheckingAuth(false);
     });
@@ -73,38 +76,77 @@ export default function LandingPage() {
                 Select the console you want to open for this session.
               </p>
             </div>
-            <button onClick={handleSignOut} className="tenxo-btn-secondary w-full sm:w-auto">
+            <button
+              onClick={handleSignOut}
+              className="tenxo-btn-secondary w-full sm:w-auto"
+            >
               <LogOut size={16} />
               Sign out
             </button>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2 md:gap-6">
+          <div className="workspace-choice-grid">
             <div
               onClick={() => router.push("/app/developer")}
-              className="tenxo-card group cursor-pointer p-6 hover:border-[var(--accent-tenxo)] sm:p-8"
+              className="workspace-choice-card group"
             >
-              <Terminal size={32} className="mb-6 text-[var(--accent-tenxo)]" />
-              <h2 className="mb-2 text-xl font-bold">Deploy Compute</h2>
-              <p className="mb-6 text-sm text-[var(--text-muted)]">
-                Rent decentralized GPUs at 50% below centralized cloud prices for AI training and inference.
-              </p>
-              <div className="flex items-center text-sm font-medium text-[var(--accent-tenxo)]">
-                Enter Console <ChevronRight size={16} className="ml-1 transition-transform group-hover:translate-x-1" />
+              <div
+                className="workspace-card-visual developer-visual"
+                aria-hidden="true"
+              >
+                <div className="visual-toolbar">
+                  <span>GPU Pods</span>
+                  <span>Live</span>
+                </div>
+                <div className="visual-row visual-row-strong" />
+                <div className="visual-row" />
+                <div className="visual-split">
+                  <span />
+                  <span />
+                </div>
+              </div>
+              <div className="workspace-card-content">
+                <Terminal size={22} className="text-[var(--text-muted)]" />
+                <h2>Developer console</h2>
+                <p>
+                  Choose GPU tiers, deploy pods, and track pay-as-you-go runtime
+                  for AI workloads.
+                </p>
+                <button className="tenxo-btn-primary" type="button">
+                  Enter console <ChevronRight size={16} />
+                </button>
               </div>
             </div>
 
             <div
               onClick={() => router.push("/app/provider")}
-              className="tenxo-card group cursor-pointer p-6 hover:border-blue-500 sm:p-8"
+              className="workspace-choice-card group"
             >
-              <Server size={32} className="mb-6 text-blue-500" />
-              <h2 className="mb-2 text-xl font-bold">Host Hardware</h2>
-              <p className="mb-6 text-sm text-[var(--text-muted)]">
-                Connect idle GPUs to the Tenxo grid and earn from verified AI workloads.
-              </p>
-              <div className="flex items-center text-sm font-medium text-blue-500">
-                Manage Nodes <ChevronRight size={16} className="ml-1 transition-transform group-hover:translate-x-1" />
+              <div
+                className="workspace-card-visual provider-visual"
+                aria-hidden="true"
+              >
+                <div className="visual-toolbar">
+                  <span>Worker Fleet</span>
+                  <span>Online</span>
+                </div>
+                <div className="visual-node-grid">
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              </div>
+              <div className="workspace-card-content">
+                <Server size={22} className="text-[var(--text-muted)]" />
+                <h2>Provider workspace</h2>
+                <p>
+                  Connect idle GPUs, verify workers, and prepare hardware for
+                  billable compute.
+                </p>
+                <button className="tenxo-btn-secondary" type="button">
+                  Deploy compute <ChevronRight size={16} />
+                </button>
               </div>
             </div>
           </div>
@@ -122,8 +164,6 @@ export default function LandingPage() {
       </div>
 
       <section className="marketing-hero">
-        <MarketingNav onSignIn={handleSignIn} />
-
         <div className="marketing-hero-inner">
           <div className="marketing-hero-copy">
             <p className="marketing-kicker">
@@ -132,8 +172,9 @@ export default function LandingPage() {
             </p>
             <h1>AI compute infrastructure builders can actually afford</h1>
             <p className="marketing-hero-subtitle">
-              Tenxo networks idle distributed GPUs into a secure compute grid for training,
-              fine-tuning, and inference at up to 50% less than centralized clouds.
+              Tenxo networks idle distributed GPUs into a secure compute grid
+              for training, fine-tuning, and inference at up to 50% less than
+              centralized clouds.
             </p>
             <form onSubmit={handleEmailSubmit} className="marketing-email-form">
               <input
@@ -147,20 +188,53 @@ export default function LandingPage() {
             </form>
           </div>
 
-          <div className="compute-visual" aria-hidden="true">
-            <div className="server-rack server-rack-large">
-              {Array.from({ length: 42 }).map((_, index) => (
-                <span key={index} />
-              ))}
-            </div>
-            <div className="server-rack server-rack-small">
-              {Array.from({ length: 20 }).map((_, index) => (
-                <span key={index} />
-              ))}
-            </div>
-            <div className="compute-card-float">
-              <Cpu size={20} />
-              <span>14,280 CUDA cores pooled</span>
+          <div className="compute-visual product-mockup" aria-hidden="true">
+            <div className="mock-window">
+              <div className="mock-sidebar">
+                <div className="mock-dot-row">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                {["Overview", "Pods", "Nodes", "Billing", "API Keys"].map(
+                  (item, index) => (
+                    <div
+                      key={item}
+                      className={index === 1 ? "mock-nav-active" : ""}
+                    >
+                      {item}
+                    </div>
+                  ),
+                )}
+              </div>
+              <div className="mock-main">
+                <div className="mock-toolbar">
+                  <span>Tenxo compute grid</span>
+                  <span>ENG-2026</span>
+                </div>
+                <div className="mock-grid">
+                  <div className="mock-panel mock-panel-large">
+                    <p>GPU pods</p>
+                    <h3>Faster app launch</h3>
+                    <span>
+                      Deploy against verified idle supply from authenticated
+                      providers.
+                    </span>
+                    <div className="mock-line w-3/4" />
+                    <div className="mock-line w-1/2" />
+                  </div>
+                  <div className="mock-panel">
+                    <p>In progress</p>
+                    <h3>14 GPUs idle</h3>
+                    <span>Matchmaker ready</span>
+                  </div>
+                  <div className="mock-panel">
+                    <p>Provider node</p>
+                    <h3>RTX worker</h3>
+                    <span>Heartbeat 42s</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -177,13 +251,16 @@ export default function LandingPage() {
       </section>
 
       <main className="marketing-main">
+        <ArchitectureWorkflow />
+
         <section className="feature-callout">
           <div>
             <p className="marketing-kicker">Now building</p>
             <h2>Tenxo launches the decentralized worker protocol</h2>
             <p>
-              Lightweight host agents authenticate into the matchmaker, expose idle GPU
-              inventory, and let developers schedule compute without managing cloud capacity.
+              Lightweight host agents authenticate into the matchmaker, expose
+              idle GPU inventory, and let developers schedule compute without
+              managing cloud capacity.
             </p>
             <div className="mt-6 flex flex-col gap-3 sm:flex-row">
               <button onClick={handleSignIn} className="tenxo-btn-primary">
@@ -194,20 +271,36 @@ export default function LandingPage() {
               </Link>
             </div>
           </div>
-          <div className="protocol-bot" aria-hidden="true">
-            <div className="bot-face">
-              <span />
-              <span />
+          <div className="protocol-bot linear-stack" aria-hidden="true">
+            <div>
+              <Cpu size={20} />
+              <span>Register GPU</span>
             </div>
-            <div className="bot-trail" />
+            <div>
+              <Lock size={20} />
+              <span>Verify token</span>
+            </div>
+            <div>
+              <Layers3 size={20} />
+              <span>Schedule pod</span>
+            </div>
           </div>
         </section>
 
         <section className="news-grid">
           {[
-            ["Build workloads", "Deploy pods against live decentralized GPU supply with token-protected APIs."],
-            ["Host hardware", "Turn underused NVIDIA machines into authenticated workers on the Tenxo network."],
-            ["Lower cloud spend", "Pool peer-to-peer capacity for AI teams that need better margins."],
+            [
+              "Build workloads",
+              "Deploy pods against live decentralized GPU supply with token-protected APIs.",
+            ],
+            [
+              "Host hardware",
+              "Turn underused NVIDIA machines into authenticated workers on the Tenxo network.",
+            ],
+            [
+              "Lower cloud spend",
+              "Pool peer-to-peer capacity for AI teams that need better margins.",
+            ],
           ].map(([title, text]) => (
             <article key={title} className="marketing-card">
               <div className="status-dot" />
@@ -226,13 +319,20 @@ export default function LandingPage() {
             <p className="marketing-kicker">Infrastructure report</p>
             <h2>Distributed GPU supply for the next wave of AI startups</h2>
             <p>
-              Centralized clouds are expensive because capacity is fragmented and scarce.
-              Tenxo makes the unused edge of the GPU market discoverable, authenticated, and schedulable.
+              Centralized clouds are expensive because capacity is fragmented
+              and scarce. Tenxo makes the unused edge of the GPU market
+              discoverable, authenticated, and schedulable.
             </p>
             <div className="report-stats">
-              <span><Globe2 size={16} /> Global hosts</span>
-              <span><Lock size={16} /> Secure sessions</span>
-              <span><Layers3 size={16} /> Pod orchestration</span>
+              <span>
+                <Globe2 size={16} /> Global hosts
+              </span>
+              <span>
+                <Lock size={16} /> Secure sessions
+              </span>
+              <span>
+                <Layers3 size={16} /> Pod orchestration
+              </span>
             </div>
           </div>
         </section>
