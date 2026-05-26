@@ -17,9 +17,18 @@ export default function BillingSetup() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(false);
 
+  // Load Razorpay Checkout script
+  useEffect(() => {
+    if (typeof window !== "undefined" && !window.Razorpay) {
+      const script = document.createElement("script");
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.async = true;
+      document.body.appendChild(script);
+    }
+  }, []);
+
   useEffect(() => {
     if (!session?.access_token) return;
-    // Check if user already has payment method
     fetch(`${API_URL}/billing/customer`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
@@ -40,28 +49,79 @@ export default function BillingSetup() {
     setLoading(true);
     setError(null);
     try {
-      // Create Stripe customer + setup intent
+      // Create Razorpay customer + setup order
       const custRes = await fetch(`${API_URL}/billing/customer`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
         body: JSON.stringify({ user_id: session.user.id, email: session.user.email }),
       });
       const custData = await custRes.json();
-      if (!custData.stripe_customer_id) throw new Error("Failed to create customer");
+      if (!custData.razorpay_customer_id) throw new Error("Failed to create customer");
 
-      // For MVP: redirect to Stripe hosted setup page
-      // In production: use Stripe Elements with @stripe/react-stripe-js
-      setStep("configure");
+      // Create setup order (₹1 verification)
+      const setupRes = await fetch(`${API_URL}/billing/setup-intent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ user_id: session.user.id }),
+      });
+      const setupData = await setupRes.json();
+      if (!setupData.order_id) throw new Error("Failed to create setup order");
+
+      // Open Razorpay Checkout
+      const options = {
+        key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
+        amount: setupData.amount,
+        currency: "INR",
+        name: "Tenxo",
+        description: "Verify payment method (₹1, immediately refunded)",
+        order_id: setupData.order_id,
+        prefill: {
+          email: session.user.email || "",
+          contact: "",
+        },
+        theme: { color: "#7c3aed" },
+        handler: async function (response) {
+          // Verify payment on backend
+          const verifyRes = await fetch(`${API_URL}/billing/verify-payment`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+            body: JSON.stringify({
+              user_id: session.user.id,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+            }),
+          });
+          if (verifyRes.ok) {
+            setStep("done");
+            setSuccess(true);
+          } else {
+            const err = await verifyRes.text();
+            setError(err);
+          }
+          setLoading(false);
+        },
+        modal: {
+          ondismiss: function () {
+            setLoading(false);
+          },
+        },
+      };
+
+      if (method === "upi") {
+        options.prefill.method = "upi";
+      }
+
+      const rzp = new window.Razorpay(options);
+      rzp.on("payment.failed", function (resp) {
+        setError(resp.error?.description || "Payment failed");
+        setLoading(false);
+      });
+      rzp.open();
     } catch (e) {
       setError(e.message);
-    } finally {
       setLoading(false);
     }
-  };
-
-  const handleDone = () => {
-    setStep("done");
-    setSuccess(true);
   };
 
   if (checkingAuth || !session) {
@@ -141,80 +201,16 @@ export default function BillingSetup() {
           ))}
         </div>
 
+        {loading && (
+          <div className="mt-6 text-center text-sm text-[var(--text-muted)]">
+            Opening Razorpay Checkout...
+          </div>
+        )}
+
         {error && (
           <div className="mt-4 flex items-start gap-3 rounded-lg bg-red-500/10 p-4 text-sm text-red-300">
             <AlertTriangle size={16} className="mt-0.5 shrink-0" />
             <span>{error}</span>
-          </div>
-        )}
-
-        {step === "configure" && selectedMethod && (
-          <div className="mt-6 rounded-xl border border-white/[0.07] bg-white/[0.035] p-6">
-            <h3 className="mb-4 font-semibold text-white">
-              {selectedMethod === "card" ? "Enter card details" : "Enter your UPI ID"}
-            </h3>
-
-            {selectedMethod === "card" ? (
-              <div className="space-y-4">
-                <div className="rounded-lg border border-white/[0.1] bg-black/20 p-3">
-                  <label className="mb-1 block text-xs font-medium text-[var(--text-muted)]">Card Number</label>
-                  <input
-                    type="text"
-                    placeholder="4242 4242 4242 4242"
-                    className="w-full bg-transparent font-mono text-sm text-white outline-none placeholder:text-white/[0.25]"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="rounded-lg border border-white/[0.1] bg-black/20 p-3">
-                    <label className="mb-1 block text-xs font-medium text-[var(--text-muted)]">Expiry</label>
-                    <input
-                      type="text"
-                      placeholder="MM / YY"
-                      className="w-full bg-transparent font-mono text-sm text-white outline-none placeholder:text-white/[0.25]"
-                    />
-                  </div>
-                  <div className="rounded-lg border border-white/[0.1] bg-black/20 p-3">
-                    <label className="mb-1 block text-xs font-medium text-[var(--text-muted)]">CVC</label>
-                    <input
-                      type="text"
-                      placeholder="123"
-                      className="w-full bg-transparent font-mono text-sm text-white outline-none placeholder:text-white/[0.25]"
-                    />
-                  </div>
-                </div>
-                <p className="text-xs text-[var(--text-muted)]">
-                  Your card info is sent directly to Stripe. We never see or store full card numbers.
-                  A $1 authorization hold will be placed and immediately refunded.
-                </p>
-                <button onClick={handleDone} className="tenxo-btn-primary w-full">
-                  <Card size={16} />
-                  Add Card
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <div className="rounded-lg border border-white/[0.1] bg-black/20 p-3">
-                  <label className="mb-1 block text-xs font-medium text-[var(--text-muted)]">UPI ID</label>
-                  <input
-                    type="text"
-                    placeholder="username@paytm / username@okhdfcbank / username@ybl"
-                    className="w-full bg-transparent font-mono text-sm text-white outline-none placeholder:text-white/[0.25]"
-                  />
-                </div>
-                <p className="text-xs text-[var(--text-muted)]">
-                  You will receive a payment request on your UPI app. Approve it to verify
-                  your payment method. A ₹1 authorization will be placed and refunded.
-                </p>
-                <button onClick={handleDone} className="tenxo-btn-primary w-full">
-                  <Smartphone size={16} />
-                  Add UPI
-                </button>
-              </div>
-            )}
-
-            <p className="mt-4 text-center text-xs text-[var(--text-muted)]">
-              Secured by <strong className="text-white">Stripe</strong>
-            </p>
           </div>
         )}
       </div>

@@ -75,70 +75,9 @@ Browser ──GET /────> Vercel (Next.js) ──API──> Render (Go ma
                                                     │
                                                     ├──NATS──> GPU Agent
                                                     │
-                                               Stripe ◄── billing.tenxo.ai
-```
+                                               Razorpay ◄── billing.tenxo.ai
 
-### 2. Client → CLI → Grid
-
-```
-Alice's Machine                  Matchmaker                     GPU Provider
-─────────────────               ───────────                    ─────────────
-tenxo run workflow.tar.gz
-  │                                  │                              │
-  ├── POST /presign ───────────────► │  returns upload URLs         │
-  ├── encrypt with AES-256-GCM      │                              │
-  ├── PUT /storage/upload ─────────►│  stores encrypted blob       │
-  ├── POST /signal/session ────────►│  creates blinded session     │
-  ├── generate ECDH keypair         │                              │
-  ├── XOR(enc_key, ECDH_secret)     │                              │
-  ├── POST /signal/client-key ─────►│── WebSocket ────────────────►│
-  │                                  │                              │
-  │                                  │         agent has private    │
-  │                                  │         key → XORs back      │
-  │                                  │         → recovers AES key   │
-  │                                  │                              │
-  │                                  │◄── agent downloads .enc ─────│
-  │                                  │    decrypts → runs in Docker │
-  │                                  │    re-encrypts result        │
-  │                                  │◄── PUT /storage/result ──────│
-  │                                  │                              │
-  ├── GET /jobs/<id> (poll) ───────►│  status: result_uploaded     │
-  ├── GET /storage/result ─────────►│  downloads encrypted result  │
-  ├── decrypt with AES key          │                              │
-  └── workflow_output.tar.gz ◄──────┘                              ┘
-```
-
-### 3. GPU Provider Onboarding
-
-```
-1. sudo apt install docker.io nvidia-driver-545
-2. curl -fsSL https://tenxo.ai/install.sh | sudo bash
-3. systemctl edit --full tenxo-agent   # set OWNER=<your-id>
-4. sudo systemctl restart tenxo-agent
-
-    Agent starts:
-        ┌──────────────────────┐
-        │  Edge Agent (Rust)   │
-        │                      │
-        │  1. Generate ECDH    │
-        │     keypair          │
-        │  2. WS /signal/agent │
-        │     → tee_quote      │
-        │     → agent_pub_key  │
-        │  3. Wait for job     │
-        │  4. Download .enc    │
-        │  5. Decrypt with     │
-        │     AES-GCM          │
-        │  6. Extract ZIP      │
-        │  7. Docker run       │
-        │     --network none   │
-        │     --cap-drop ALL   │
-        │  8. Re-encrypt       │
-        │  9. Upload result    │
-        └──────────────────────┘
-```
-
-### 4. Payment Flow (Stripe)
+### 4. Payment Flow (Razorpay)
 
 ```
 User clicks "Buy Credits"
@@ -147,19 +86,22 @@ User clicks "Buy Credits"
 Frontend POST /billing/checkout { user_id, amount_cents }
         │
         ▼
-Stripe Checkout Session (redirects to stripe.com)
+Razorpay Checkout (opens inline in browser)
         │
         ▼
-User completes payment
+User completes ₹1 verification payment
         │
         ▼
-Stripe POST /billing/webhook (checkout.session.completed)
+Frontend POST /billing/verify-payment (signature + token saved)
         │
         ▼
-Redis HINCRBY credits:<user_id> gpu_hours <hours>
+Razorpay POST /billing/webhook (payment.captured)
         │
         ▼
-User now has GPU hours — jobs can be submitted
+Redis stores saved token — user can now submit jobs
+
+Usage is tracked per-second. Auto-charge triggers at $1 threshold
+via saved card/UPI token.
 ```
 
 ## Component Architecture
@@ -180,8 +122,10 @@ User now has GPU hours — jobs can be submitted
 │  ├── WS  /ws             — real-time job notifications   │
 │  ├── WS  /signal/agent   — agent key exchange            │
 │  ├── WS  /signal/client  — client key exchange           │
-│  ├── POST /billing/checkout — Stripe checkout session    │
-│  ├── POST /billing/webhook  — Stripe payment webhook     │
+│  ├── POST /billing/setup-intent — Razorpay order creation │
+│  ├── POST /billing/verify-payment — save payment token   │
+│  ├── POST /billing/charge  — charge saved card/UPI       │
+│  ├── POST /billing/webhook  — Razorpay payment webhook   │
 │  ├── GET  /billing/credits  — user credit balance        │
 │  └── storage/upload/*    — local file storage            │
 │                                                            │
@@ -257,7 +201,7 @@ either ECDH shared secret (needs at least one private key).
 | Render      | Backend (Go)       | Free tier |
 | Render      | Redis              | Free      |
 | Synadia     | NATS Cloud         | Free tier |
-| Stripe      | Payments           | 2.9%+fee  |
+| Razorpay    | Payments           | 2%+GST    |
 | Supabase    | Auth + DB          | Free tier |
 | Cloudflare R2 | Blob storage    | Free tier |
 
@@ -280,7 +224,7 @@ Runs NATS, Redis, matchmaker, and frontend all on one machine.
 │   ├── configs/
 │   │   └── nats.conf
 │   ├── payment/
-│   │   └── stripe.go         # Stripe checkout + webhook
+│   │   └── razorpay.go       # Razorpay checkout + webhook
 │   └── signaling/
 │       └── types.go          # WS session store, agent/client handlers
 │

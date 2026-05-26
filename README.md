@@ -235,28 +235,30 @@ Branch: main
 5. Create a **Redis** instance on Render — copy the connection string
 6. Deploy
 
-#### 2. Vercel — Frontend
+#### 2. Render — Frontend (Static Site)
 
-1. Go to https://vercel.com → **Add New Project** → import GitHub repo
-2. Set **Root Directory**: `frontend/`
-3. Add env vars:
-   - `NEXT_PUBLIC_API_URL=https://your-app.onrender.com`
-   - `NEXT_PUBLIC_WS_URL=wss://your-app.onrender.com`
+1. Go to https://dashboard.render.com → **New +** → **Static Site**
+2. Connect your GitHub repo → root `frontend/`
+3. Build command: `npm install && npm run build`
+4. Publish directory: `out`
+5. Add env vars:
+   - `NEXT_PUBLIC_API_URL=https://tenxo-api.onrender.com`
+   - `NEXT_PUBLIC_WS_URL=wss://tenxo-api.onrender.com`
    - `NEXT_PUBLIC_SUPABASE_URL=...`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY=...`
-   - `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_...`
-4. Deploy
+   - `NEXT_PUBLIC_RAZORPAY_KEY_ID=rzp_test_...`
+6. Create — it stays awake 24/7 for $0
 
-#### 3. Stripe — Payment Webhook
+#### 3. Razorpay — Payment Webhook
 
-1. Go to https://dashboard.stripe.com/webhooks
-2. Add endpoint: `https://your-app.onrender.com/billing/webhook`
-3. Listen for: `checkout.session.completed`, `payment_intent.succeeded`, `payment_intent.payment_failed`
-4. Copy the signing secret → set as `STRIPE_WEBHOOK_SECRET` on Render
+1. Go to https://dashboard.razorpay.com → **Settings → Webhooks**
+2. Add endpoint: `https://tenxo-api.onrender.com/billing/webhook`
+3. Events: `payment.captured`, `payment.failed`
+4. Generate a secret → set as `RAZORPAY_WEBHOOK_SECRET` on Render
 
 #### 4. Supabase — Auth
 
 1. Create project at https://supabase.com
 2. Enable email auth (or Google/GitHub OAuth)
-3. Copy project URL + anon key → set on Vercel
-4. Get JWKS URL: `https://<project>.supabase.co/.well-known/jwks.json` → set on Render
+3. Copy project URL + anon key → set on Render Static Site env
+4. Get JWKS URL → set on Render Web Service

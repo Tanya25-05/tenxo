@@ -142,23 +142,25 @@ func main() {
 	http.HandleFunc("/storage/result-upload/", cors(srv.handleStorageResultUpload))
 	http.HandleFunc("/storage/result/", cors(srv.handleStorageGet))
 	http.HandleFunc("/ws", cors(srv.handleWS))
+	http.HandleFunc("/health", cors(handleHealth))
 
 	// Zero-knowledge key exchange signaling (routes only, never inspects keys)
 	RegisterSignalingRoutes(http.DefaultServeMux)
 
-	// Billing / Stripe — Vast.ai/RunPod model (pay-as-you-go, card + UPI)
+	// Billing / Razorpay — Vast.ai/RunPod model (pay-as-you-go, card + UPI)
 	paymentHandler := payment.NewBillingHandler(rdb)
 	if paymentHandler.Enabled() {
 		http.HandleFunc("/billing/customer", cors(paymentHandler.HandleCreateCustomer))
 		http.HandleFunc("/billing/setup-intent", cors(paymentHandler.HandleCreateSetupIntent))
+		http.HandleFunc("/billing/verify-payment", cors(paymentHandler.HandleVerifyPayment))
 		http.HandleFunc("/billing/payment-methods", cors(paymentHandler.HandleListPaymentMethods))
 		http.HandleFunc("/billing/track-usage", cors(paymentHandler.HandleTrackUsage))
 		http.HandleFunc("/billing/charge", cors(paymentHandler.HandleCharge))
 		http.HandleFunc("/billing/usage", cors(paymentHandler.HandleGetUsage))
-		http.HandleFunc("/billing/webhook", cors(paymentHandler.HandleStripeWebhook))
-		log.Println("payment: PAYG billing (card+UPI) routes registered — /billing/*")
+		http.HandleFunc("/billing/webhook", cors(paymentHandler.HandleWebhook))
+		log.Println("payment: Razorpay PAYG billing (card+UPI) — /billing/*")
 	} else {
-		log.Println("payment: billing disabled — set STRIPE_SECRET_KEY to enable")
+		log.Println("payment: billing disabled — set RAZORPAY_KEY_ID to enable")
 	}
 
 	log.Printf("HTTP server listening on %s", apiAddr)
