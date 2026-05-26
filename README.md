@@ -190,3 +190,73 @@ sudo ./target/release/edge_agent
 - **In-TEE execution**: decrypt → execute → re-encrypt entirely inside enclave
 - **Ephemeral keys**: fresh X25519 per agent instance; no long-term key stored
 - **Sandboxed Docker**: `--network none --cap-drop ALL`
+
+## What Makes Tenxo Different (vs Vast.ai / RunPod / Lambda)
+
+| Feature | Tenxo | Vast.ai | RunPod | Lambda |
+|---------|-------|---------|--------|--------|
+| **E2E Encryption** | Zero-knowledge ECDH + AES-256-GCM | ❌ Platform has access to data | ❌ Platform has access | ❌ Platform has access |
+| **Zero-Knowledge Matchmaker** | Routes XOR'd keys, never plaintext | ❌ | ❌ | ❌ |
+| **TEE Attestation** | Agent proves integrity via SEV-SNP / TDX quote | ❌ | ❌ | ❌ |
+| **Payload Padding** | Tier-padded (1/5/10 GB) for plausible deniability | ❌ | ❌ | ❌ |
+| **Forward Secrecy** | Ephemeral ECDH keys per session | ❌ | ❌ | ❌ |
+| **No Single Trust Party** | Even we can't decrypt your data | You trust Vast.ai | You trust RunPod | You trust Lambda |
+| **UPI Payments** | Credit card + UPI (India) | Card/PayPal/Crypto | Card/PayPal | Card/Invoice |
+| **Per-Second Billing** | Yes | Hourly | Per-second | Monthly |
+| **CLI + Web** | `pip install tenxo` + dashboard | Web + SSH | Web + CLI | Web + CLI |
+
+**TL;DR: Tenxo is the first GPU cloud where the platform operator cannot access your data — ever.**
+
+## Deployment
+
+### Code pushed to GitHub
+```
+Repo: https://github.com/Tanya25-05/tenxo  (private)
+Branch: main
+```
+
+### To deploy on Render (Backend) + Vercel (Frontend):
+
+#### 1. Render — Matchmaker + Redis
+
+1. Go to https://dashboard.render.com
+2. Create a **New Web Service** → connect your GitHub repo
+3. Set:
+   - **Root Directory**: `backend/`
+   - **Build Command**: `go build -o matchmaker .`
+   - **Start Command**: `./matchmaker`
+4. Add env vars (copy from `.env.example`):
+   - `API_ADDR=:8080`
+   - `NATS_URL=nats://nats:4222`
+   - `REDIS_ADDR=redis://your-redis-url:6379`
+   - `STRIPE_SECRET_KEY=sk_test_...`
+   - `STRIPE_WEBHOOK_SECRET=whsec_...`
+   - `SUPABASE_JWKS_URL=https://your-project.supabase.co/.well-known/jwks.json`
+5. Create a **Redis** instance on Render — copy the connection string
+6. Deploy
+
+#### 2. Vercel — Frontend
+
+1. Go to https://vercel.com → **Add New Project** → import GitHub repo
+2. Set **Root Directory**: `frontend/`
+3. Add env vars:
+   - `NEXT_PUBLIC_API_URL=https://your-app.onrender.com`
+   - `NEXT_PUBLIC_WS_URL=wss://your-app.onrender.com`
+   - `NEXT_PUBLIC_SUPABASE_URL=...`
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY=...`
+   - `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_...`
+4. Deploy
+
+#### 3. Stripe — Payment Webhook
+
+1. Go to https://dashboard.stripe.com/webhooks
+2. Add endpoint: `https://your-app.onrender.com/billing/webhook`
+3. Listen for: `checkout.session.completed`, `payment_intent.succeeded`, `payment_intent.payment_failed`
+4. Copy the signing secret → set as `STRIPE_WEBHOOK_SECRET` on Render
+
+#### 4. Supabase — Auth
+
+1. Create project at https://supabase.com
+2. Enable email auth (or Google/GitHub OAuth)
+3. Copy project URL + anon key → set on Vercel
+4. Get JWKS URL: `https://<project>.supabase.co/.well-known/jwks.json` → set on Render
