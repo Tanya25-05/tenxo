@@ -33,10 +33,13 @@ use serde::Deserialize;
 use sha2::Sha256;
 use std::env;
 use std::fs::{self, File};
+use std::net::TcpStream;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 use tempfile::tempdir;
+use tungstenite::{Message, WebSocket};
+use tungstenite::stream::MaybeTlsStream;
 use uuid::Uuid;
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
 
@@ -52,7 +55,8 @@ const HEARTBEAT_INTERVAL_SECS: u64 = 20;
 #[derive(Deserialize)]
 struct JobMsg {
     job_id: Option<String>,
-    encrypted_job_url: String,
+    #[serde(alias = "encrypted_job_url")]
+    encrypted_job_link: String,
     result_upload_url: String,
     #[serde(default)]
     enc_key_b64: Option<String>,
@@ -203,9 +207,7 @@ fn encrypt_payload(plaintext: &[u8], aes_key: &[u8; AEAD_KEY_SIZE]) -> Result<Ve
 fn perform_key_exchange(
     matchmaker_url: &str,
     agent_keys: AgentKeys,
-) -> Result<(Vec<u8>, Vec<u8>)> {
-    use tungstenite::Message;
-
+) -> Result<(Vec<u8>, WebSocket<MaybeTlsStream<TcpStream>>)> {
     let ws_url = matchmaker_url
         .replace("http://", "ws://")
         .replace("https://", "wss://");
@@ -266,24 +268,22 @@ fn perform_key_exchange(
         }
     };
 
-    // ── Step 6: Close WebSocket (key exchange complete) ──────────────
-    let _ = ws.close(None);
-    println!("WebSocket signaling complete for session {}", session_id);
-
     let client_pubkey_raw = general_purpose::STANDARD
         .decode(&client_pubkey)
         .context("failed to decode client public key")?;
 
-    // ── Step 7: Compute ECDH shared secret ────────────────────────────
+    // ── Step 6: Compute ECDH shared secret ────────────────────────────
     let shared_secret = agent_keys.consume_shared_secret(&client_pubkey_raw);
     let shared_bytes: [u8; 32] = shared_secret.to_bytes();
-
-    println!("ECDH key exchange complete for session {}", session_id);
 
     // The shared secret is the AES-256-GCM payload key BASE.
     // We still need the salt (sent by the client in the job message) to
     // derive the final AES key via HKDF.
-    Ok((shared_bytes.to_vec(), client_pubkey_raw.to_vec()))
+
+    println!("ECDH key exchange complete for session {}", session_id);
+    println!("WebSocket bridge active for session {}", session_id);
+
+    Ok((shared_bytes.to_vec(), ws))
 }
 
 // ─── Docker Execution ──────────────────────────────────────────────────────
@@ -388,7 +388,7 @@ fn handle_job(
     println!("Processing job: {} (encrypted)", job_id);
 
     // ── Step 1: Download encrypted payload ─────────────────────────────
-    let enc_bytes = download_bytes(client, &job.encrypted_job_url)
+    let enc_bytes = download_bytes(client, &job.encrypted_job_link)
         .context("failed to download encrypted job payload")?;
     println!("Downloaded {} encrypted bytes", enc_bytes.len());
 
@@ -493,22 +493,16 @@ fn download_bytes(client: &Client, url: &str) -> Result<Vec<u8>> {
 // ─── Main Entry Point ──────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
-    let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".into());
     let matchmaker_url =
         env::var("MATCHMAKER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
-    let subject = env::var("JOBS_SUBJECT").unwrap_or_else(|_| "jobs".into());
-    let result_subject = env::var("RESULT_SUBJECT").unwrap_or_else(|_| "jobs.results".into());
     let node_id =
         env::var("NODE_ID").unwrap_or_else(|_| format!("node-{}", Uuid::new_v4()));
     let owner = env::var("OWNER").unwrap_or_else(|_| String::new());
 
     println!("Tenxo Edge Agent starting...");
     println!("  Node ID:    {}", node_id);
-    println!("  NATS:       {}", nats_url);
     println!("  Matchmaker: {}", matchmaker_url);
 
-    // ── Connect to NATS ──────────────────────────────────────────────
-    let nc = nats::connect(&nats_url).context("failed to connect to NATS")?;
     let client = Client::builder()
         .timeout(Duration::from_secs(3600))
         .build()
@@ -518,22 +512,28 @@ fn main() -> Result<()> {
     let agent_keys = AgentKeys::generate();
     println!("Ephemeral X25519 keypair generated");
 
-    // ── ECDH Key Exchange (Zero-Knowledge via matchmaker WebSocket) ──
-    let (shared_secret, _client_pubkey) = perform_key_exchange(
+    // ── ECDH Key Exchange + acquire persistent WebSocket bridge ──────
+    // The WS stays open after key exchange for jobs and results.
+    let (shared_secret, mut ws) = perform_key_exchange(
         &matchmaker_url,
         agent_keys,
     )?;
     println!("ECDH shared secret computed (matchmaker never saw it)");
 
-    // At this point we have the shared_secret[32].
-    // The AES key will be derived via HKDF when we receive the salt in the job message.
-    // For now, store it for use during job processing.
-    //
-    // Note: the salt is sent by the CLI as part of the job message to ensure
-    // the matchmaker cannot derive the AES key from the shared secret alone.
+    // ── Register with matchmaker bridge ────────────────────────────
+    let reg_msg = serde_json::json!({
+        "type": "heartbeat",
+        "payload": {
+            "node_id": node_id,
+            "status": "idle",
+            "owner": owner,
+        }
+    });
+    ws.send(Message::Text(serde_json::to_string(&reg_msg)?))?;
 
-    // ── Spawn heartbeat publisher ────────────────────────────────────
-    let nc2 = nc.clone();
+    // ── Spawn heartbeat publisher (HTTP POST, no NATS needed) ──────
+    let hb_client = client.clone();
+    let hb_url = format!("{}/agent/heartbeat", matchmaker_url);
     let hb_node = node_id.clone();
     let hb_owner = owner.clone();
     std::thread::spawn(move || {
@@ -543,137 +543,92 @@ fn main() -> Result<()> {
                 "status": "idle",
                 "owner": hb_owner,
             });
-            let _ = nc2.publish(
-                &format!("heartbeats.{}", hb_node),
-                &serde_json::to_vec(&hb).unwrap(),
-            );
+            let _ = hb_client.post(&hb_url).json(&hb).send();
             std::thread::sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
         }
     });
 
-    // ── Subscribe to job queue ───────────────────────────────────────
-    let sub = nc
-        .subscribe(&subject)
-        .context("failed to subscribe to job subject")?;
-    println!("Subscribed to NATS subject: {}", subject);
+    // ── Job processing loop via WebSocket bridge ─────────────────────
+    loop {
+        let msg = ws.read().context("WS bridge read failed")?;
+        match msg {
+            Message::Text(text) => {
+                let payload: JobMsg = match serde_json::from_str(&text) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("invalid job message from bridge: {}", e);
+                        continue;
+                    }
+                };
 
-    // ── Job processing loop ──────────────────────────────────────────
-    for msg in sub.messages() {
-        let data = msg.data.clone();
-        let payload: JobMsg = match serde_json::from_slice(&data) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("invalid job message: {}", e);
-                continue;
-            }
-        };
+                // ── Derive AES key from shared secret + per-job salt ─
+                let result = match &payload.salt_b64 {
+                    Some(s) => {
+                        let salt = general_purpose::STANDARD
+                            .decode(s)
+                            .context("failed to decode salt")?;
+                        if salt.len() != SALT_SIZE {
+                            eprintln!("invalid salt length: {} (expected {})", salt.len(), SALT_SIZE);
+                            continue;
+                        }
+                        let mut aes_key = [0u8; AEAD_KEY_SIZE];
+                        aes_key.copy_from_slice(&derive_aes_key(&shared_secret, &salt));
+                        println!("AES key derived via HKDF for job {}", payload.job_id.as_deref().unwrap_or("?"));
+                        handle_job(&client, &payload, &aes_key)
+                    }
+                    None => {
+                        // Legacy: use enc_key_b64 as raw AES key
+                        let key_b64 = payload.enc_key_b64.as_deref().unwrap_or("");
+                        if key_b64.is_empty() {
+                            eprintln!("no enc_key_b64 or salt_b64 in job message");
+                            Err(anyhow!("missing encryption key"))
+                        } else {
+                            let key_bytes = general_purpose::STANDARD
+                                .decode(key_b64)
+                                .context("failed to decode enc_key_b64")?;
+                            if key_bytes.len() != AEAD_KEY_SIZE {
+                                eprintln!("invalid key length: {}", key_bytes.len());
+                                continue;
+                            }
+                            let mut aes_key = [0u8; AEAD_KEY_SIZE];
+                            aes_key.copy_from_slice(&key_bytes);
+                            handle_job(&client, &payload, &aes_key)
+                        }
+                    }
+                };
 
-        // ── Derive AES key from shared secret + per-job salt ─────────
-        let salt = match &payload.salt_b64 {
-            Some(s) => general_purpose::STANDARD
-                .decode(s)
-                .context("failed to decode salt")?,
-            None => {
-                // Legacy: use the enc_key_b64 as the raw AES key
-                // (backward compatibility with non-ECDH protocol)
-                let key_b64 = payload
-                    .enc_key_b64
-                    .as_deref()
-                    .unwrap_or_else(|| {
-                        eprintln!("no enc_key_b64 or salt_b64 in job message");
-                        ""
-                    });
-                if key_b64.is_empty() {
-                    eprintln!("no encryption key in job message");
-                    let reply = serde_json::json!({
-                        "job_id": payload.job_id,
-                        "status": "error",
-                        "error": "no encryption key or salt provided",
-                    });
-                    let _ = nc.publish(
-                        &result_subject,
-                        &serde_json::to_vec(&reply).unwrap(),
-                    );
-                    continue;
-                }
-                // Legacy mode: use raw key directly (skip HKDF)
-                let key_bytes = general_purpose::STANDARD
-                    .decode(key_b64)
-                    .context("failed to decode enc_key_b64")?;
-                if key_bytes.len() != AEAD_KEY_SIZE {
-                    eprintln!("invalid key length: {}", key_bytes.len());
-                    continue;
-                }
-                let mut aes_key = [0u8; AEAD_KEY_SIZE];
-                aes_key.copy_from_slice(&key_bytes);
-                match handle_job(&client, &payload, &aes_key) {
+                // ── Send result over WebSocket bridge ─────────────────
+                let reply = match result {
                     Ok(result_url) => {
-                        let reply = serde_json::json!({
-                            "job_id": payload.job_id,
-                            "status": "done",
-                            "result_url": result_url,
-                        });
-                        let _ = nc.publish(
-                            &result_subject,
-                            &serde_json::to_vec(&reply).unwrap(),
-                        );
+                        println!("Job {} completed successfully", payload.job_id.unwrap_or_default());
+                        serde_json::json!({
+                            "type": "result",
+                            "payload": {
+                                "job_id": payload.job_id,
+                                "status": "done",
+                                "result_url": result_url,
+                            }
+                        })
                     }
                     Err(e) => {
-                        let reply = serde_json::json!({
-                            "job_id": payload.job_id,
-                            "status": "error",
-                            "error": format!("{}", e),
-                        });
-                        let _ = nc.publish(
-                            &result_subject,
-                            &serde_json::to_vec(&reply).unwrap(),
-                        );
+                        eprintln!("Job failed: {}", e);
+                        serde_json::json!({
+                            "type": "result",
+                            "payload": {
+                                "job_id": payload.job_id,
+                                "status": "error",
+                                "error": format!("{}", e),
+                            }
+                        })
                     }
-                }
-                continue;
+                };
+                let _ = ws.send(Message::Text(serde_json::to_string(&reply).unwrap()));
             }
-        };
-
-        if salt.len() != SALT_SIZE {
-            eprintln!("invalid salt length: {} (expected {})", salt.len(), SALT_SIZE);
-            continue;
-        }
-
-        // HKDF-SHA256 derive the per-job AES key from (shared_secret, salt)
-        let mut aes_key = [0u8; AEAD_KEY_SIZE];
-        aes_key.copy_from_slice(&derive_aes_key(&shared_secret, &salt));
-
-        println!("AES key derived via HKDF for job {}", payload.job_id.as_deref().unwrap_or("?"));
-
-        // ── Execute the job ──────────────────────────────────────────
-        match handle_job(&client, &payload, &aes_key) {
-            Ok(result_url) => {
-                let reply = serde_json::json!({
-                    "job_id": payload.job_id,
-                    "status": "done",
-                    "result_url": result_url,
-                });
-                let _ = nc.publish(
-                    &result_subject,
-                    &serde_json::to_vec(&reply).unwrap(),
-                );
-                println!(
-                    "Job {} completed successfully",
-                    payload.job_id.unwrap_or_default()
-                );
+            Message::Close(_) => {
+                println!("WebSocket bridge closed by server");
+                break;
             }
-            Err(e) => {
-                eprintln!("Job failed: {}", e);
-                let reply = serde_json::json!({
-                    "job_id": payload.job_id,
-                    "status": "error",
-                    "error": format!("{}", e),
-                });
-                let _ = nc.publish(
-                    &result_subject,
-                    &serde_json::to_vec(&reply).unwrap(),
-                );
-            }
+            _ => {}
         }
     }
 

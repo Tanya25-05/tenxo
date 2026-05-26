@@ -43,6 +43,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/nats-io/nats.go"
 )
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -83,6 +84,11 @@ type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	upgrader websocket.Upgrader
+	nc       *nats.Conn
+}
+
+func (ss *SessionStore) SetNATS(nc *nats.Conn) {
+	ss.nc = nc
 }
 
 // NewSessionStore creates a new session store with a WebSocket upgrader.
@@ -213,6 +219,59 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("signaling: agent received client pubkey for session %s", sessionID)
 	ss.DeleteSession(sessionID)
+
+	// ── Persistent bridge mode: WS ↔ NATS ────────────────────────────
+	// After key exchange, the WebSocket stays open and acts as a NATS
+	// proxy for this agent. This avoids exposing the NATS port to the
+	// internet — agents communicate entirely through port 8080.
+	if ss.nc == nil {
+		log.Printf("signaling: no NATS available, closing agent WS %s", sessionID)
+		return
+	}
+
+	nodeID := sessionID
+
+	sub, err := ss.nc.Subscribe("jobs", func(m *nats.Msg) {
+		if err := conn.WriteMessage(websocket.TextMessage, m.Data); err != nil {
+			log.Printf("signaling: write job to WS failed (%s): %v", sessionID, err)
+		}
+	})
+	if err != nil {
+		log.Printf("signaling: subscribe jobs failed (%s): %v", sessionID, err)
+		return
+	}
+	defer sub.Unsubscribe()
+
+	log.Printf("signaling: agent %s entering bridge mode", sessionID)
+
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			log.Printf("signaling: agent WS disconnected (%s): %v", sessionID, err)
+			break
+		}
+
+		var wsMsg WSMessage
+		if err := json.Unmarshal(raw, &wsMsg); err != nil {
+			log.Printf("signaling: agent bad WS message (%s): %v", sessionID, err)
+			continue
+		}
+
+		switch wsMsg.Type {
+		case "heartbeat":
+			var hb struct {
+				NodeID string `json:"node_id"`
+			}
+			if err := json.Unmarshal(wsMsg.Payload, &hb); err == nil && hb.NodeID != "" {
+				nodeID = hb.NodeID
+			}
+			ss.nc.Publish("heartbeats."+nodeID, wsMsg.Payload)
+		case "result":
+			ss.nc.Publish("jobs.results", wsMsg.Payload)
+		default:
+			log.Printf("signaling: unknown WS message type from agent (%s): %s", sessionID, wsMsg.Type)
+		}
+	}
 }
 
 // ─── Client Handler ─────────────────────────────────────────────────────────

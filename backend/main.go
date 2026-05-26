@@ -146,6 +146,10 @@ func main() {
 
 	// Zero-knowledge key exchange signaling (routes only, never inspects keys)
 	RegisterSignalingRoutes(http.DefaultServeMux)
+	signalStore.SetNATS(nc)
+
+	// Agent HTTP endpoints (no NATS port exposed — all via port 8080)
+	http.HandleFunc("/agent/heartbeat", cors(srv.handleAgentHeartbeat))
 
 	// Billing / Razorpay — Vast.ai/RunPod model (pay-as-you-go, card + UPI)
 	paymentHandler := payment.NewBillingHandler(rdb)
@@ -167,6 +171,44 @@ func main() {
 	if err := http.ListenAndServe(apiAddr, nil); err != nil {
 		log.Fatalf("http server failed: %v", err)
 	}
+}
+
+func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var hb HeartbeatPayload
+	if err := json.NewDecoder(r.Body).Decode(&hb); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if hb.NodeID == "" {
+		http.Error(w, "node_id required", http.StatusBadRequest)
+		return
+	}
+	if hb.Status == "" {
+		hb.Status = "idle"
+	}
+
+	ctx := context.Background()
+	key := fmt.Sprintf("node:%s", hb.NodeID)
+	if err := s.rdb.Set(ctx, key, hb.Status, 60*time.Second).Err(); err != nil {
+		log.Printf("heartbeat: failed to set node state for %s: %v", hb.NodeID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if hb.Owner != "" {
+		ownerKey := fmt.Sprintf("node_owner:%s", hb.NodeID)
+		if err := s.rdb.Set(ctx, ownerKey, hb.Owner, 0).Err(); err != nil {
+			log.Printf("heartbeat: failed to set node owner for %s: %v", hb.NodeID, err)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func getEnv(key, fallback string) string {
