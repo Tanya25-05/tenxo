@@ -16,7 +16,6 @@ import { useRequireSession } from "../../../lib/useRequireSession";
 import AppShell from "../../../components/AppShell";
 import MetricCard from "../../../components/MetricCard";
 import { API_URL } from "../../../lib/api";
-import { API_URL } from "../../../lib/api";
 
 const gpuTiers = [
   {
