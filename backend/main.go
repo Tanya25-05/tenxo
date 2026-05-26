@@ -96,20 +96,22 @@ func main() {
 		log.Fatalf("redis ping failed: %v", err)
 	}
 
-	// NATS
-	nc, err := nats.Connect(natsURL)
-	if err != nil {
-		log.Fatalf("nats connect failed: %v", err)
-	}
-	defer nc.Drain()
-
-	js, err := nc.JetStream()
-	if err != nil {
-		log.Fatalf("jetstream setup failed: %v", err)
-	}
-
-	if err := ensureStream(js, streamName); err != nil {
-		log.Fatalf("could not ensure JetStream stream: %v", err)
+	// NATS (optional — billing/health work without it)
+	var nc *nats.Conn
+	var js nats.JetStreamContext
+	if ncConn, err := nats.Connect(natsURL); err != nil {
+		log.Printf("warning: nats connect failed (billing only mode): %v", err)
+	} else {
+		nc = ncConn
+		defer nc.Drain()
+		if jsCtx, err := nc.JetStream(); err != nil {
+			log.Printf("warning: jetstream setup failed (billing only mode): %v", err)
+		} else {
+			js = jsCtx
+			if err := ensureStream(js, streamName); err != nil {
+				log.Printf("warning: could not ensure JetStream stream (billing only mode): %v", err)
+			}
+		}
 	}
 
 // JWKS (Supabase) - optional
@@ -378,6 +380,10 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.js == nil {
+		http.Error(w, "NATS not available (billing only mode)", http.StatusServiceUnavailable)
+		return
+	}
 	_, err = s.js.Publish("jobs", msgData)
 	if err != nil {
 		http.Error(w, "failed to enqueue job", http.StatusInternalServerError)
@@ -549,6 +555,10 @@ func RegisterSignalingRoutes(mux *http.ServeMux) {
 }
 
 func (s *Server) listenHeartbeats(ctx context.Context) {
+	if s.nc == nil {
+		log.Println("heartbeats: NATS not available, skipping")
+		return
+	}
 	_, err := s.nc.Subscribe("heartbeats.>", func(msg *nats.Msg) {
 		hb := HeartbeatPayload{Status: "idle"}
 		if len(msg.Data) > 0 {
@@ -837,6 +847,10 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) subscribeResults() {
+	if s.nc == nil {
+		log.Println("results: NATS not available, skipping")
+		return
+	}
 	sub, err := s.nc.Subscribe("jobs.results", func(msg *nats.Msg) {
 		var payload map[string]any
 		_ = json.Unmarshal(msg.Data, &payload)
