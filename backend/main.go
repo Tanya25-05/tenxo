@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+
 	// "github.com/aws/aws-sdk-go-v2/feature/s3/presign"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/golang-jwt/jwt/v5"
@@ -108,12 +109,12 @@ func main() {
 		log.Fatalf("could not ensure JetStream stream: %v", err)
 	}
 
-// JWKS (Supabase) - optional
+	// JWKS (Supabase) - optional
 	var jwks keyfunc.Keyfunc
 	jwksURL := os.Getenv("SUPABASE_JWKS_URL")
 	if jwksURL != "" {
 		log.Printf("Loading JWKS from %s", jwksURL)
-		
+
 		// NewDefault automatically fetches the keys and sets up a background refresh
 		var err error
 		jwks, err = keyfunc.NewDefault([]string{jwksURL})
@@ -138,6 +139,12 @@ func main() {
 	http.HandleFunc("/storage/result-upload/", cors(srv.handleStorageResultUpload))
 	http.HandleFunc("/storage/result/", cors(srv.handleStorageGet))
 	http.HandleFunc("/ws", cors(srv.handleWS))
+	http.HandleFunc("/health", handleHealth)
+
+	log.Printf("HTTP server listening on %s", apiAddr)
+	if err := http.ListenAndServe(apiAddr, nil); err != nil {
+		log.Fatalf("http server failed: %v", err)
+	}
 
 	log.Printf("HTTP server listening on %s", apiAddr)
 	if err := http.ListenAndServe(apiAddr, nil); err != nil {
@@ -188,11 +195,11 @@ func (s *Server) r2Client(ctx context.Context) (*s3.Client, string, error) {
 	secretKey := os.Getenv("R2_SECRET_ACCESS_KEY")
 	accountID := os.Getenv("R2_ACCOUNT_ID")
 	bucket := os.Getenv("R2_BUCKET")
-	
+
 	if accessKey == "" || secretKey == "" || accountID == "" || bucket == "" {
 		return nil, "", nil
 	}
-	
+
 	endpoint := os.Getenv("R2_ENDPOINT")
 	if endpoint == "" {
 		endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", accountID)
@@ -205,12 +212,12 @@ func (s *Server) r2Client(ctx context.Context) (*s3.Client, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	
+
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
 		o.UsePathStyle = true
 	})
-	
+
 	return client, bucket, nil
 }
 
@@ -490,7 +497,7 @@ func (s *Server) listenHeartbeats(ctx context.Context) {
 			log.Printf("failed to update node state for %s: %v", hb.NodeID, err)
 			return
 		}
-		
+
 		if hb.Owner != "" {
 			ownerKey := fmt.Sprintf("node_owner:%s", hb.NodeID)
 			if err := s.rdb.Set(ctx, ownerKey, hb.Owner, 0).Err(); err != nil {
@@ -509,14 +516,14 @@ func (s *Server) validateAuth(token string) (string, error) {
 	if token == "" {
 		return "", errors.New("empty token")
 	}
-	
+
 	h := sha256.Sum256([]byte(token))
 	hexk := hex.EncodeToString(h[:])
 	ctx := context.Background()
 	if uid, err := s.rdb.Get(ctx, fmt.Sprintf("api_key:%s", hexk)).Result(); err == nil {
 		return uid, nil
 	}
-	
+
 	if s.jwks != nil {
 		t, err := s.parseAndValidateToken(token)
 		if err != nil {
@@ -703,7 +710,7 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown job id", http.StatusNotFound)
 		return
 	}
-	
+
 	var path string
 	if p, ok := data["result_path"]; ok && p != "" {
 		path = p

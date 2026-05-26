@@ -6,9 +6,10 @@ services:
       - "4222:4222"
       - "8222:8222"
     volumes:
-      - ./configs/nats.conf:/etc/nats/nats-server.conf:ro
-      - ./jetstream:/data
+      - /home/giyu/codes/opensource/tenxo/configs/nats.conf:/etc/nats/nats-server.conf:ro
+      - /home/giyu/codes/opensource/tenxo/jetstream:/data
     command: ["-c", "/etc/nats/nats-server.conf"]
+    restart: unless-stopped
 
   redis:
     image: redis:7
