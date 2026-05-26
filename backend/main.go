@@ -28,6 +28,9 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/gpu-grid/matchmaker/payment"
+	"github.com/gpu-grid/matchmaker/signaling"
 )
 
 type Server struct {
@@ -45,6 +48,7 @@ type JobRequest struct {
 	JobLink          string `json:"job_link"`
 	JobID            string `json:"job_id"`
 	EncKeyB64        string `json:"enc_key_b64"`
+	SaltB64          string `json:"salt_b64"`
 }
 
 type HeartbeatPayload struct {
@@ -138,6 +142,24 @@ func main() {
 	http.HandleFunc("/storage/result-upload/", cors(srv.handleStorageResultUpload))
 	http.HandleFunc("/storage/result/", cors(srv.handleStorageGet))
 	http.HandleFunc("/ws", cors(srv.handleWS))
+
+	// Zero-knowledge key exchange signaling (routes only, never inspects keys)
+	RegisterSignalingRoutes(http.DefaultServeMux)
+
+	// Billing / Stripe — Vast.ai/RunPod model (pay-as-you-go, card + UPI)
+	paymentHandler := payment.NewBillingHandler(rdb)
+	if paymentHandler.Enabled() {
+		http.HandleFunc("/billing/customer", cors(paymentHandler.HandleCreateCustomer))
+		http.HandleFunc("/billing/setup-intent", cors(paymentHandler.HandleCreateSetupIntent))
+		http.HandleFunc("/billing/payment-methods", cors(paymentHandler.HandleListPaymentMethods))
+		http.HandleFunc("/billing/track-usage", cors(paymentHandler.HandleTrackUsage))
+		http.HandleFunc("/billing/charge", cors(paymentHandler.HandleCharge))
+		http.HandleFunc("/billing/usage", cors(paymentHandler.HandleGetUsage))
+		http.HandleFunc("/billing/webhook", cors(paymentHandler.HandleStripeWebhook))
+		log.Println("payment: PAYG billing (card+UPI) routes registered — /billing/*")
+	} else {
+		log.Println("payment: billing disabled — set STRIPE_SECRET_KEY to enable")
+	}
 
 	log.Printf("HTTP server listening on %s", apiAddr)
 	if err := http.ListenAndServe(apiAddr, nil); err != nil {
@@ -312,15 +334,41 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 
 	ctx := context.Background()
 	jobKey := fmt.Sprintf("job:%s", jobID)
-	_, _ = s.rdb.HSet(ctx, jobKey, map[string]interface{}{"owner": userID, "status": "queued", "upload_url": jobLink}).Result()
-	resultUploadURL, _ := s.rdb.HGet(ctx, jobKey, "result_upload_url").Result()
 
-	msg := map[string]string{"job_id": jobID, "encrypted_job_link": jobLink, "owner": userID}
-	if resultUploadURL != "" {
-		msg["result_upload_url"] = resultUploadURL
+	// Merge new fields into existing job hash (don't blow away presign data)
+	updates := map[string]interface{}{
+		"owner":      userID,
+		"status":     "queued",
+		"upload_url": jobLink,
+	}
+	if payload.EncKeyB64 != "" {
+		updates["enc_key_b64"] = payload.EncKeyB64
+	}
+	if payload.SaltB64 != "" {
+		updates["salt_b64"] = payload.SaltB64
+	}
+	_, _ = s.rdb.HSet(ctx, jobKey, updates).Result()
+
+	// Fetch result_upload_url (set by presign or from env default)
+	resultUploadURL, _ := s.rdb.HGet(ctx, jobKey, "result_upload_url").Result()
+	if resultUploadURL == "" {
+		// If no presign was done, build a default result upload URL
+		public := getEnv("PUBLIC_API_URL", "http://localhost:8080")
+		resultUploadURL = fmt.Sprintf("%s/storage/result-upload/%s", public, jobID)
+		_, _ = s.rdb.HSet(ctx, jobKey, "result_upload_url", resultUploadURL).Result()
+	}
+
+	msg := map[string]string{
+		"job_id":             jobID,
+		"encrypted_job_link": jobLink,
+		"result_upload_url":  resultUploadURL,
+		"owner":              userID,
 	}
 	if payload.EncKeyB64 != "" {
 		msg["enc_key_b64"] = payload.EncKeyB64
+	}
+	if payload.SaltB64 != "" {
+		msg["salt_b64"] = payload.SaltB64
 	}
 	msgData, err := json.Marshal(msg)
 	if err != nil {
@@ -467,6 +515,37 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// ─── Signaling Routes (Zero-Knowledge ECDH Key Exchange) ───────────────────
+
+var signalStore *signaling.SessionStore
+
+func initSignaling() {
+	signalStore = signaling.NewSessionStore()
+}
+
+func RegisterSignalingRoutes(mux *http.ServeMux) {
+	initSignaling()
+
+	// WebSocket endpoints for real-time key exchange
+	mux.HandleFunc("/signal/agent", cors(signalStore.HandleAgentWS))
+	mux.HandleFunc("/signal/client", cors(signalStore.HandleClientWS))
+
+	// REST endpoints for CLI-based polling flow
+	mux.HandleFunc("/signal/session", cors(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			signalStore.HandleCreateSession(w, r)
+		case http.MethodGet:
+			signalStore.HandleGetSession(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	mux.HandleFunc("/signal/client-key", cors(signalStore.HandlePostClientKey))
+
+	log.Println("signaling: zero-knowledge ECDH routes registered")
+}
+
 func (s *Server) listenHeartbeats(ctx context.Context) {
 	_, err := s.nc.Subscribe("heartbeats.>", func(msg *nats.Msg) {
 		hb := HeartbeatPayload{Status: "idle"}
@@ -599,6 +678,7 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 		"upload_url":        uploadURL,
 		"result_upload_url": resultUploadURL,
 		"result_url":        resultURL,
+		"enc_key_b64":       keyB64,
 	}).Result()
 
 	resp := PresignResponse{
@@ -613,10 +693,6 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut && r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	jobID := strings.TrimPrefix(r.URL.Path, "/storage/upload/")
 	if jobID == "" {
 		http.Error(w, "missing job id", http.StatusBadRequest)
@@ -631,6 +707,22 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	uploadsDir := getEnv("UPLOADS_DIR", "uploads")
+
+	if r.Method == http.MethodGet {
+		filePath := filepath.Join(uploadsDir, jobID+".enc")
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			http.Error(w, "file not found", http.StatusNotFound)
+			return
+		}
+		http.ServeFile(w, r, filePath)
+		return
+	}
+
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	_ = os.MkdirAll(uploadsDir, 0o755)
 	filePath := filepath.Join(uploadsDir, jobID+".enc")
 	f, err := os.Create(filePath)

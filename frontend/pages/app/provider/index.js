@@ -13,6 +13,7 @@ import {
 import { useRequireSession } from "../../../lib/useRequireSession";
 import AppShell from "../../../components/AppShell";
 import MetricCard from "../../../components/MetricCard";
+import { API_URL } from "../../../lib/api";
 
 export default function ProviderDashboard() {
   const { checkingAuth, session } = useRequireSession();
@@ -27,7 +28,7 @@ export default function ProviderDashboard() {
 
   const fetchMyNodes = async (token) => {
     try {
-      const res = await fetch("http://localhost:8080/my-nodes", {
+      const res = await fetch(`${API_URL}/my-nodes`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();

@@ -1,96 +1,192 @@
-# GPU Grid Matchmaker
+# Tenxo — Zero-Knowledge Decentralized GPU Grid
 
-This repository now separates frontend and backend. See `/frontend` for the Next.js scaffold and `/backend` for the Go matchmaker and supporting services.
+A distributed GPU compute marketplace with E2EE execution inside TEEs.
+The matchmaker routes **only public keys** — it never sees the AES payload key, the ECDH shared secret, or the plaintext workload.
 
-A lightweight control plane for decentralized GPU compute.
+## Architecture
 
-## What this does
-
-## Requirements
-
-- WSL2 with a Linux distro installed
-- Go 1.22+ inside WSL
-- NATS Server with JetStream enabled
-- Redis
-
-## Quick start
-
-1. Install a WSL2 distro on Windows:
-
-```powershell
-wsl --install -d ubuntu-22.04
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                            Flow                                     │
+│                                                                     │
+│   Client                        Matchmaker                Agent     │
+│     │                              │                       │        │
+│     │  1. Register Session         │                       │        │
+│     │◄─────────────────────────────│                       │        │
+│     │                              │ 2. Agent connects     │        │
+│     │                              │◄──────────────────────│        │
+│     │  3. Agent's TEE Quote        │                       │        │
+│     │◄─────────────────────────────│                       │        │
+│     │  4. Verify Quote, send       │                       │        │
+│     │     ClientPubKey             │                       │        │
+│     │─────────────────────────────►│  5. Forward PubKey    │        │
+│     │                              │──────────────────────►│        │
+│     │                              │  6. Compute ECDH,     │        │
+│     │                              │     store AES key     │        │
+│     │  7. Submit job (salt only,   │                       │        │
+│     │     NOT AES key)             │                       │        │
+│     │─────────────────────────────►│  8. Forward job       │        │
+│     │                              │──────────────────────►│        │
+│     │                              │  9. Derive AES key    │        │
+│     │                              │     via HKDF(salt),   │        │
+│     │                              │     decrypt, execute, │        │
+│     │                              │     re-encrypt result │        │
+│     │ 10. Download result          │                       │        │
+│     │◄─────────────────────────────│                       │        │
+│     │ 11. Decrypt with client-side │                       │        │
+│     │     AES key                  │                       │        │
+│     │                              │                       │        │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-2. Open the WSL shell and install Redis, Go, and NATS:
+### Key properties
+- **Matchmaker is zero-knowledge**: routes AgentPubKey and ClientPubKey but computes no crypto operations
+- **ECDH shared secret** is derived client-side and agent-side only — never transmitted
+- **AES payload key** = HKDF-SHA256(ECDH_shared_secret, per-job_salt) — fresh per job
+- **Payloads padded** to uniform tier sizes (1/5/10 GB) for plausible deniability
+- **TEE attestation**: agent proves it runs inside AMD SEV-SNP / Intel TDX before client sends pubkey
+
+## Components
+
+| Component | Language | Location | Role |
+|-----------|----------|----------|------|
+| **Matchmaker** | Go | `backend/` | Session routing, job queue (NATS) |
+| **Edge Agent** | Rust | `edge_agent/` | In-TEE execution, key derivation |
+| **CLI/SDK** | Python | `tenxo/` | Key generation, encryption, job submission |
+
+## Quick Start
 
 ```bash
-sudo apt update
-sudo apt install -y redis-server curl tar
+# 1. Start infrastructure (NATS + Redis)
+docker compose up -d
+
+# 2. Start matchmaker (port :8080)
+cd backend && go run main.go
+
+# 3. Edge agent connects, registers TEE quote via WebSocket
+cd edge_agent && cargo run --release
+
+# 4. Python CLI — submit a job
+python -m tenxo.cli run ./my_work_dir --api-url http://localhost:8080 --api-key <your_key>
 ```
 
-Install Go using the official tarball if not already installed.
-
-3. Run Redis in WSL:
+## Full Project Execution
 
 ```bash
-sudo service redis-server start
+# Terminal 1 — infrastructure
+docker compose up -d
+
+# Terminal 2 — matchmaker
+cd backend && go run main.go          # listens on :8080
+
+# Terminal 3 — edge agent (GPU provider)
+cd edge_agent && NATS_URL=nats://localhost:4222 \
+    MATCHMAKER_URL=http://localhost:8080 \
+    OWNER=<your_user_id> \
+    cargo run --release
+
+# Terminal 4 — client submit a job
+cd tenxo && pip install -e . && \
+    python -m tenxo.cli run ./my_work \
+    --api-url http://localhost:8080 \
+    --api-key dev-local-abc123
 ```
 
-4. Start NATS with JetStream enabled:
+Register a test API key in Redis:
 
 ```bash
-cd /mnt/e/projects/GPU_grid
-nats-server -c configs/nats.conf
+# Hash the key with SHA-256
+echo -n "dev-local-abc123" | sha256sum
+# Returns a hex hash; let's say it's abc123...
+# Then set it in Redis:
+docker compose exec redis redis-cli SET api_key:<hex_hash> local-dev-user
 ```
 
-5. Run the Go API:
+## Cryptographic Protocol
 
-```bash
-cd /mnt/e/projects/GPU_grid
-go run main.go
-```
+1. **Client** generates ephemeral X25519 keypair
+2. **Agent** generates ephemeral X25519 keypair, sends TEE quote to client via matchmaker
+3. **Client** verifies quote against AMD cert chain, then sends ClientPubKey to agent
+4. **Both** compute ECDH shared secret
+5. **Client** derives AES key = HKDF(shared_secret, salt), encrypts payload, pads to tier
+6. **Client** submits salt (not AES key) via matchmaker to agent
+7. **Agent** derives same AES key, decrypts inside TEE, executes via Docker, re-encrypts result
 
 ## API
 
-### POST /jobs
+### Signaling (WebSocket + REST)
 
-Request body:
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| WS | `/signal/agent` | Agent registers with TEE quote |
+| WS | `/signal/client` | Client receives quote, sends pubkey |
+| POST | `/signal/session` | Create session (REST fallback) |
+| GET | `/signal/session/:id` | Get session status |
+| POST | `/signal/session/:id/client-key` | Submit client key (REST) |
 
-```json
-{
-  "encrypted_job_link": "s3://encrypted-job-blob"
-}
-```
+### Jobs (NATS)
 
-Response:
+| Subject | Schema | Purpose |
+|---------|--------|---------|
+| `jobs.submit` | `{session_id, salt_b64, encrypted_payload_link}` | Submit encrypted job |
+| `jobs.result` | `{session_id, encrypted_result_link}` | Notification of completed job |
 
-```json
-{
-  "status": "queued",
-  "subject": "jobs"
-}
-```
+## Registering a GPU Node (Edge Agent Onboarding)
 
-### GET /nodes
+GPU providers run the Rust edge agent on their machine. Here's what's needed:
 
-Returns active nodes from Redis:
+### Prerequisites (on the provider machine)
 
-```json
-{
-  "nodes": [{ "node_id": "456", "status": "idle", "ttl_seconds": 59 }]
-}
-```
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| Linux (Ubuntu 22.04+) | — | WSL2 works for local dev |
+| NVIDIA GPU | — | Tested on A100, V100, RTX 4090 |
+| nvidia-container-toolkit | latest | Required for `--gpus all` in Docker |
+| Docker | 24+ | With nvidia runtime configured |
+| Rust toolchain | 1.75+ | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` |
+| Network | — | Outbound to matchmaker NATS (4222) and HTTP (8080) |
 
-## NATS stream configuration
+### What files the agent needs
 
-`configs/nats.conf` enables JetStream persistence and stores stream data in `./jetstream`.
-
-## Docker alternative
-
-If you prefer Docker inside WSL, use:
+All you need is the `edge_agent/` directory. Build with:
 
 ```bash
-docker compose up -d
+git clone <repo-url>
+cd GPU_grid/edge_agent
+cargo build --release
+sudo ./target/release/edge_agent
 ```
 
-Then run the Go API as above.
+### Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `NATS_URL` | `nats://127.0.0.1:4222` | Matchmaker NATS address |
+| `MATCHMAKER_URL` | `http://127.0.0.1:8080` | Matchmaker HTTP address (for WS signaling) |
+| `OWNER` | `""` | Your user/account ID (matched via Redis API key) |
+| `NODE_ID` | `node-<uuid>` | Unique node identifier (auto-generated if empty) |
+| `JOBS_SUBJECT` | `jobs` | NATS subject to subscribe for job messages |
+| `RESULT_SUBJECT` | `jobs.results` | NATS subject to publish job results |
+
+### Registration flow
+
+1. The matchmaker operator gives you the `NATS_URL` and `MATCHMAKER_URL`
+2. Your API key is registered in Redis by the operator
+3. Set `OWNER=<your_user_id>` matching the API key
+4. Start the agent — it connects to the matchmaker, generates an ephemeral X25519 keypair, and begins broadcasting heartbeats
+5. The matchmaker lists your node in `GET /nodes` and routes jobs to it
+
+### What the agent does (zero-trust)
+
+- **Never stores plaintext**: downloads encrypted blobs, decrypts IN-MEMORY inside the TEE
+- **No persistent state**: ephemeral keys, fresh per instance
+- **Sandboxed execution**: Docker `--network none --cap-drop ALL --security-opt no-new-privileges:true`
+- **Plausible deniability**: all payloads are tier-padded; you only know the tier size (1/5/10 GB)
+
+## Security Model
+
+- **Plausible deniability**: all payloads padded to standard tier size
+- **Zero-trust matchmaker**: sees only public keys and routing metadata
+- **In-TEE execution**: decrypt → execute → re-encrypt entirely inside enclave
+- **Ephemeral keys**: fresh X25519 per agent instance; no long-term key stored
+- **Sandboxed Docker**: `--network none --cap-drop ALL`

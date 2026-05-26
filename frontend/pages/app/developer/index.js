@@ -15,6 +15,8 @@ import {
 import { useRequireSession } from "../../../lib/useRequireSession";
 import AppShell from "../../../components/AppShell";
 import MetricCard from "../../../components/MetricCard";
+import { API_URL } from "../../../lib/api";
+import { API_URL } from "../../../lib/api";
 
 const gpuTiers = [
   {
@@ -60,7 +62,7 @@ export default function DeveloperDashboard() {
   useEffect(() => {
     async function fetchPods() {
       try {
-        const res = await fetch("http://localhost:8080/pods");
+        const res = await fetch(`${API_URL}/pods`);
         if (res.ok) setPods(await res.json());
       } catch (error) {
         console.error("Failed to fetch pods", error);
@@ -81,7 +83,7 @@ export default function DeveloperDashboard() {
 
   const fetchNetworkStatus = async (token) => {
     try {
-      const res = await fetch("http://localhost:8080/nodes", {
+      const res = await fetch(`${API_URL}/nodes`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();

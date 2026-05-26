@@ -11,5 +11,13 @@ frontend/node_modules/
 frontend/.next/
 uploads/
 backend/*.exe
+backend/matchmaker
 edge_agent/target/
 CODEBASE_DOCUMENTATION.pdf
+*.egg-info/
+tenxo/build/
+tenxo/dist/
+__pycache__/
+*.pyc
+control-server/
+templates/

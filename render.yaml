@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: tenxo-matchmaker
+    env: docker
+    repo: https://github.com/YOUR_USER/gpu-grid
+    branch: main
+    dockerfilePath: ./backend/Dockerfile
+    envVars:
+      - key: API_ADDR
+        value: ":8080"
+      - key: PUBLIC_API_URL
+        fromService:
+          type: web
+          name: tenxo-matchmaker
+          property: host
+      - key: NATS_URL
+        value: nats://nats:4222
+      - key: REDIS_ADDR
+        value: redis://redis:6379
+      - key: SUPABASE_JWKS_URL
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+
+databases:
+  - name: tenxo-redis
+    plan: free
+
+  - name: tenxo-nats
+    type: docker
+    plan: free
