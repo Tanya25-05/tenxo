@@ -1,0 +1,52 @@
+Metadata-Version: 2.4
+Name: tenxo
+Version: 0.1.0
+Summary: Tenxo - Zero-knowledge decentralized GPU grid CLI
+Author: Tenxo
+License: MIT
+Project-URL: Homepage, https://tenxo.ai
+Project-URL: Source, https://github.com/tenxo/tenxo
+Keywords: gpu,decentralized,ml,training,zero-knowledge
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: requests>=2.28
+Requires-Dist: tqdm>=4.64
+Requires-Dist: cryptography>=41
+
+# Tenxo
+
+Zero-knowledge decentralized GPU grid — package and train AI models on remote GPUs.
+
+## Install
+
+```bash
+pip install tenxo
+```
+
+## Quickstart
+
+```bash
+# Package your workspace
+tenxo pack
+
+# Full workflow: package → encrypt → upload → submit → poll → decrypt
+tenxo run /path/to/workspace
+```
+
+## `.tenxoignore`
+
+Create a `.tenxoignore` in your workspace root to exclude files (syntax like `.gitignore`):
+
+```
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.git/
+output/
+*.zip
+```
+
+Running `tenxo pack` automatically reads `.tenxoignore` (falls back to `.gitignore`) and warns if `requirements.txt` is missing.

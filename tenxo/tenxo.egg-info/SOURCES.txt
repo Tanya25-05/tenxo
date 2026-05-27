@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+tenxo/__init__.py
+tenxo/__main__.py
+tenxo/cli.py
+tenxo/client.py
+tenxo/crypto.py
+tenxo/pack.py
+tenxo.egg-info/PKG-INFO
+tenxo.egg-info/SOURCES.txt
+tenxo.egg-info/dependency_links.txt
+tenxo.egg-info/entry_points.txt
+tenxo.egg-info/requires.txt
+tenxo.egg-info/top_level.txt
