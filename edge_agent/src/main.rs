@@ -623,17 +623,6 @@ fn main() -> Result<()> {
                             }
                         })
                     }
-                    Err(e) => {
-                        eprintln!("Job failed: {}", e);
-                        serde_json::json!({
-                            "type": "result",
-                            "payload": {
-                                "job_id": payload.job_id,
-                                "status": "error",
-                                "error": format!("{}", e),
-                            }
-                        })
-                    }
                 };
                 let _ = ws.send(Message::Text(serde_json::to_string(&reply).unwrap()));
             }

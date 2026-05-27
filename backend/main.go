@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
 
@@ -141,7 +142,7 @@ func main() {
 	http.HandleFunc("/storage/upload/", cors(srv.authMiddleware(srv.handleStorageUpload)))
 	http.HandleFunc("/storage/result-upload/", cors(srv.authMiddleware(srv.handleStorageResultUpload)))
 	http.HandleFunc("/storage/result/", cors(srv.authMiddleware(srv.handleStorageGet)))
-	http.HandleFunc("/ws", cors(srv.authMiddleware(srv.handleWS)))
+	http.HandleFunc("/ws", cors(srv.handleWS))
 	http.HandleFunc("/agent/heartbeat", cors(srv.authMiddleware(srv.handleAgentHeartbeat)))
 
 	// Zero-knowledge key exchange signaling (routes only, never inspects keys)
@@ -249,9 +250,6 @@ func extractToken(r *http.Request) string {
 	if token := r.Header.Get("X-API-Key"); token != "" {
 		return token
 	}
-	if token := r.URL.Query().Get("token"); token != "" {
-		return token
-	}
 	return ""
 }
 
@@ -313,10 +311,26 @@ func (s *Server) requireJobOwner(next func(http.ResponseWriter, *http.Request, s
 }
 
 func cors(next http.HandlerFunc) http.HandlerFunc {
+	allowedOrigins := getEnv("ALLOWED_ORIGINS", "https://tenxo.onrender.com")
+	origins := strings.Split(allowedOrigins, ",")
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		allowed := ""
+		for _, o := range origins {
+			if strings.TrimSpace(o) == origin || allowedOrigins == "*" {
+				allowed = origin
+				break
+			}
+		}
+		if allowed == "" && len(origins) > 0 {
+			allowed = strings.TrimSpace(origins[0])
+		}
+		if allowed != "" {
+			w.Header().Set("Access-Control-Allow-Origin", allowed)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key")
+		w.Header().Set("Vary", "Origin")
 
 		// Handle preflight requests
 		if r.Method == http.MethodOptions {
@@ -702,7 +716,7 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Server-generated jobID — client-provided ID is ignored to prevent hijacking
-	jobID := fmt.Sprintf("job-%d", time.Now().UnixNano())
+	jobID := fmt.Sprintf("job-%s", uuid.New().String()[:8])
 
 	ctx := context.Background()
 	uploadURL, resultUploadURL, resultURL, err := s.getUploadURLs(ctx, jobID)
@@ -773,6 +787,8 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 512<<20) // 512 MB max upload
+
 	_ = os.MkdirAll(uploadsDir, 0o755)
 	filePath := filepath.Join(uploadsDir, jobID+".enc")
 	f, err := os.Create(filePath)
@@ -823,6 +839,7 @@ func (s *Server) handleStorageResultUpload(w http.ResponseWriter, r *http.Reques
 
 	uploadsDir := getEnv("UPLOADS_DIR", "uploads")
 	_ = os.MkdirAll(uploadsDir, 0o755)
+	r.Body = http.MaxBytesReader(w, r.Body, 512<<20) // 512 MB max upload
 	filePath := filepath.Join(uploadsDir, jobID+".result.enc")
 	f, err := os.Create(filePath)
 	if err != nil {
@@ -971,12 +988,6 @@ func (s *Server) sendWS(userID, payload string) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	userID, ok := r.Context().Value(userIDKey).(string)
-	if !ok || userID == "" {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxo.onrender.com")
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -997,6 +1008,31 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upgrade failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Authenticate via first message: {"type":"auth","token":"..."}
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		conn.Close()
+		return
+	}
+	var authMsg struct {
+		Type  string `json:"type"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(msg, &authMsg); err != nil || authMsg.Type != "auth" || authMsg.Token == "" {
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth_error","error":"invalid auth message"}`))
+		conn.Close()
+		return
+	}
+
+	userID, err := s.validateAuth(authMsg.Token)
+	if err != nil {
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth_error","error":"unauthorized"}`))
+		conn.Close()
+		return
+	}
+
+	conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth_ok"}`))
 
 	s.wsMu.Lock()
 	if s.wsClients[userID] == nil {
