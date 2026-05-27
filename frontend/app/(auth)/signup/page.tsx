@@ -35,7 +35,7 @@ export default function SignupPage() {
     const { error } = await supabase.auth.signUp({
       email,
       password,
-      options: { emailRedirectTo: `${window.location.origin}/developer` },
+      options: { emailRedirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || window.location.origin}/developer` },
     });
     if (error) {
       setError(error.message);
@@ -51,7 +51,7 @@ export default function SignupPage() {
     setLoading(true);
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/developer` },
+      options: { redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || window.location.origin}/developer` },
     });
     if (error) {
       setError(error.message);

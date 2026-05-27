@@ -27,16 +27,24 @@ export function useNatsSocket({ token, onJobUpdate }: UseNatsSocketOptions) {
     if (!token || !mountedRef.current) return;
 
     setStatus("connecting");
-    const url = `${WS_URL}/ws?token=${encodeURIComponent(token)}`;
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(WS_URL + "/ws");
 
     ws.onopen = () => {
-      if (mountedRef.current) setStatus("connected");
+      ws.send(JSON.stringify({ type: "auth", token }));
     };
 
     ws.onmessage = (event) => {
       try {
-        const update: JobUpdate = JSON.parse(event.data);
+        const msg = JSON.parse(event.data);
+        if (msg.type === "auth_ok") {
+          if (mountedRef.current) setStatus("connected");
+          return;
+        }
+        if (msg.type === "auth_error") {
+          ws.close();
+          return;
+        }
+        const update: JobUpdate = msg;
         onJobUpdate?.(update);
       } catch {
         // silent
