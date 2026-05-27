@@ -15,7 +15,8 @@ import {
   Sparkles,
 } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
-import { Button } from "@/components/Button";
+import { Button } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
@@ -122,7 +123,7 @@ export default function DeveloperDashboard() {
 
   if (checkingAuth || !session) {
     return (
-      <div className="grid min-h-screen place-items-center text-sm text-gray-500">
+      <div className="grid min-h-screen place-items-center text-sm   text-text-tertiary">
         Verifying Tenxo session...
       </div>
     );
@@ -131,27 +132,27 @@ export default function DeveloperDashboard() {
   return (
     <div className="p-6">
       {/* Topbar */}
-      <div className="mb-6 flex items-center justify-between gap-4 border-b border-white/[0.06] pb-4">
+      <div className="mb-6 flex items-center justify-between gap-4 border-b border-white/[0.08] pb-4">
         <div>
-          <p className="text-[10px] font-semibold tracking-widest text-gray-600 uppercase">
+          <p className="text-[10px] font-semibold tracking-widest   text-text-tertiary uppercase">
             Developer Console
           </p>
           <h1 className="text-xl font-semibold tracking-tight text-white sm:text-2xl">
             {activeTab === "billing" ? "API, Billing & Access" : "GPU Compute Pods"}
           </h1>
         </div>
-        <div className="flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/[0.03] px-3.5 py-1.5 text-[11px] font-medium text-gray-400">
+        <div className="flex items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.03] px-3.5 py-1.5 text-[11px] font-medium text-text-secondary">
           <span className="size-1.5 rounded-full bg-emerald-500/70" />
           {loadingNetwork ? "Scanning grid" : `${networkNodes.length} GPUs idle`}
         </div>
       </div>
 
       {/* Tab nav */}
-      <div className="mb-6 flex gap-1 rounded-lg border border-white/[0.06] bg-white/[0.02] p-1">
+      <div className="mb-6 flex gap-1 rounded-lg border border-white/[0.08] bg-white/[0.02] p-1">
         <button
           onClick={() => setActiveTab("pods")}
           className={`rounded-md px-4 py-1.5 text-xs font-medium transition-colors ${
-            activeTab === "pods" ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"
+            activeTab === "pods" ? "bg-white/10 text-white" : "  text-text-tertiary hover:text-text-secondary"
           }`}
         >
           Compute
@@ -159,7 +160,7 @@ export default function DeveloperDashboard() {
         <button
           onClick={() => setActiveTab("billing")}
           className={`rounded-md px-4 py-1.5 text-xs font-medium transition-colors ${
-            activeTab === "billing" ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"
+            activeTab === "billing" ? "bg-white/10 text-white" : "  text-text-tertiary hover:text-text-secondary"
           }`}
         >
           API & Billing
@@ -176,16 +177,16 @@ export default function DeveloperDashboard() {
           </section>
 
           {/* Meter section */}
-          <section className="rounded-xl border border-white/[0.06] bg-[#0c0c0d]">
-            <div className="flex flex-col gap-4 border-b border-white/[0.06] p-5 sm:flex-row sm:items-center sm:justify-between">
+          <section className="rounded-xl border border-white/[0.08] bg-[#0c0c0d]">
+            <div className="flex flex-col gap-4 border-b border-white/[0.08] p-5 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <p className="text-[10px] font-semibold tracking-widest text-gray-600 uppercase">
+                <p className="text-[10px] font-semibold tracking-widest   text-text-tertiary uppercase">
                   Pay as you go
                 </p>
                 <h2 className="mt-1 text-lg font-semibold text-white">
                   Choose compute and meter usage
                 </h2>
-                <p className="mt-1 text-xs text-gray-500">
+                <p className="mt-1 text-xs   text-text-tertiary">
                   Select the GPU class for a workload. Runtime is tracked by the second and priced hourly.
                 </p>
               </div>
@@ -209,7 +210,7 @@ export default function DeveloperDashboard() {
             </div>
 
             <div className="grid gap-0 lg:grid-cols-[1.25fr_0.75fr]">
-              <div className="border-b border-white/[0.06] p-5 lg:border-b-0 lg:border-r">
+              <div className="border-b border-white/[0.08] p-5 lg:border-b-0 lg:border-r">
                 <div className="space-y-2">
                   {gpuTiers.map((tier) => (
                     <button
@@ -218,16 +219,16 @@ export default function DeveloperDashboard() {
                       className={`flex w-full items-center justify-between gap-4 rounded-lg border px-4 py-3 text-left transition-colors ${
                         selectedGpuId === tier.id
                           ? "border-white/20 bg-white/[0.06]"
-                          : "border-white/[0.06] hover:border-white/20 hover:bg-white/[0.03]"
+                          : "border-white/[0.08] hover:border-white/20 hover:bg-white/[0.03]"
                       }`}
                     >
                       <span>
                         <p className="text-sm font-medium text-white">{tier.name}</p>
-                        <p className="mt-0.5 text-xs text-gray-500">
+                        <p className="mt-0.5 text-xs   text-text-tertiary">
                           {tier.memory} VRAM &middot; {tier.useCase}
                         </p>
                       </span>
-                      <span className="text-sm font-medium text-gray-300">
+                      <span className="text-sm font-medium text-text-secondary">
                         ${tier.price.toFixed(2)}/hr
                       </span>
                     </button>
@@ -237,20 +238,20 @@ export default function DeveloperDashboard() {
 
               <div className="flex flex-col justify-between p-5">
                 <div>
-                  <p className="text-[10px] font-semibold tracking-widest text-gray-600 uppercase">
+                  <p className="text-[10px] font-semibold tracking-widest   text-text-tertiary uppercase">
                     Current meter
                   </p>
                   <h3 className="mt-1 text-lg font-semibold text-white">{selectedGpu.name}</h3>
                 </div>
                 <div className="mt-6 flex items-center gap-2 font-mono text-2xl font-semibold tracking-tight text-white">
-                  <Clock3 className="size-5 text-gray-500" />
+                  <Clock3 className="size-5   text-text-tertiary" />
                   <span>{meterTime}</span>
                 </div>
-                <div className="mt-4 flex items-center justify-between gap-4 border-t border-white/[0.06] pt-4">
-                  <span className="text-xs text-gray-500">Estimated charge</span>
+                <div className="mt-4 flex items-center justify-between gap-4 border-t border-white/[0.08] pt-4">
+                  <span className="text-xs   text-text-tertiary">Estimated charge</span>
                   <strong className="text-lg font-semibold text-white">${meteredCost}</strong>
                 </div>
-                <div className="mt-4 flex items-start gap-2 text-[11px] text-gray-500">
+                <div className="mt-4 flex items-start gap-2 text-[11px]   text-text-tertiary">
                   <Gauge className="mt-0.5 size-3.5 shrink-0" />
                   <span>Charges scale with active runtime. Production billing should be backed by server-side pod events.</span>
                 </div>
@@ -259,14 +260,14 @@ export default function DeveloperDashboard() {
           </section>
 
           {/* Pods section */}
-          <section className="rounded-xl border border-white/[0.06] bg-[#0c0c0d]">
-            <div className="flex flex-col gap-4 border-b border-white/[0.06] p-5 sm:flex-row sm:items-center sm:justify-between">
+          <section className="rounded-xl border border-white/[0.08] bg-[#0c0c0d]">
+            <div className="flex flex-col gap-4 border-b border-white/[0.08] p-5 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <p className="text-[10px] font-semibold tracking-widest text-gray-600 uppercase">
+                <p className="text-[10px] font-semibold tracking-widest   text-text-tertiary uppercase">
                   Deploy
                 </p>
                 <h2 className="mt-1 text-lg font-semibold text-white">Compute pods</h2>
-                <p className="mt-1 text-xs text-gray-500">
+                <p className="mt-1 text-xs   text-text-tertiary">
                   Launch decentralized containers against the live GPU supply.
                 </p>
               </div>
@@ -283,14 +284,14 @@ export default function DeveloperDashboard() {
             </div>
 
             {loading ? (
-              <div className="py-10 text-center text-xs text-gray-500">Loading pods...</div>
+              <div className="py-10 text-center text-xs   text-text-tertiary">Loading pods...</div>
             ) : pods.length === 0 ? (
               <div className="grid place-items-center px-6 py-14 text-center">
-                <div className="mb-4 flex size-12 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.03]">
-                  <Cpu className="size-5 text-gray-300" />
+                <div className="mb-4 flex size-12 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
+                  <Cpu className="size-5 text-text-secondary" />
                 </div>
                 <h3 className="text-base font-semibold text-white">No active pods yet</h3>
-                <p className="mt-2 max-w-md text-xs text-gray-500">
+                <p className="mt-2 max-w-md text-xs   text-text-tertiary">
                   Start with a small inference pod, then scale into idle GPUs as demand grows.
                 </p>
               </div>
@@ -303,7 +304,7 @@ export default function DeveloperDashboard() {
                         <span className="size-1.5 rounded-full bg-emerald-500/70" />
                         <p className="text-sm font-medium text-white">{pod.name}</p>
                       </div>
-                      <p className="mt-1 truncate font-mono text-xs text-gray-500">{pod.id}</p>
+                      <p className="mt-1 truncate font-mono text-xs   text-text-tertiary">{pod.id}</p>
                     </div>
                     <Button variant="ghost" size="sm">
                       <Play className="size-3.5" />
@@ -316,50 +317,50 @@ export default function DeveloperDashboard() {
           </section>
 
           {/* Marketplace */}
-          <section className="rounded-xl border border-white/[0.06] bg-[#0c0c0d]">
-            <div className="flex items-center justify-between border-b border-white/[0.06] px-6 py-4">
+          <section className="rounded-xl border border-white/[0.08] bg-[#0c0c0d]">
+            <div className="flex items-center justify-between border-b border-white/[0.08] px-6 py-4">
               <div>
-                <p className="text-[10px] font-semibold tracking-widest text-gray-600 uppercase">
+                <p className="text-[10px] font-semibold tracking-widest   text-text-tertiary uppercase">
                   Marketplace
                 </p>
                 <h2 className="mt-1 text-lg font-semibold text-white">Idle GPU supply</h2>
               </div>
-              <div className="hidden items-center gap-2 text-xs text-gray-500 sm:flex">
-                <ShieldCheck className="size-4 text-gray-400" />
+              <div className="hidden items-center gap-2 text-xs   text-text-tertiary sm:flex">
+                <ShieldCheck className="size-4 text-text-secondary" />
                 Authenticated providers
               </div>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
                 <thead>
-                  <tr className="border-b border-white/[0.06]">
-                    <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider text-gray-600">Node ID</th>
-                    <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider text-gray-600">Status</th>
-                    <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider text-gray-600">Price / Hr</th>
-                    <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider text-gray-600">Availability</th>
+                  <tr className="border-b border-white/[0.08]">
+                    <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider   text-text-tertiary">Node ID</th>
+                    <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider   text-text-tertiary">Status</th>
+                    <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider   text-text-tertiary">Price / Hr</th>
+                    <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider   text-text-tertiary">Availability</th>
                   </tr>
                 </thead>
                 <tbody>
                   {networkNodes.length === 0 && !loadingNetwork ? (
                     <tr>
-                      <td colSpan={4} className="px-6 py-8 text-center text-xs text-gray-500">
+                      <td colSpan={4} className="px-6 py-8 text-center text-xs   text-text-tertiary">
                         No idle nodes currently available on the grid.
                       </td>
                     </tr>
                   ) : (
                     networkNodes.map((node) => (
                       <tr key={node.node_id} className="border-b border-white/[0.03] transition-colors last:border-0 hover:bg-white/[0.02]">
-                        <td className="px-6 py-3 font-mono text-xs text-gray-300">
+                        <td className="px-6 py-3 font-mono text-xs text-text-secondary">
                           {node.node_id.substring(0, 12)}...
                         </td>
                         <td className="px-6 py-3">
-                          <span className="inline-flex items-center gap-1.5 text-xs text-gray-400">
+                          <span className="inline-flex items-center gap-1.5 text-xs text-text-secondary">
                             <span className="size-1.5 rounded-full bg-emerald-500/70" />
                             {node.status}
                           </span>
                         </td>
-                        <td className="px-6 py-3 text-xs text-gray-300">$0.15</td>
-                        <td className="px-6 py-3 text-xs text-gray-500">Ready for match</td>
+                        <td className="px-6 py-3 text-xs text-text-secondary">$0.15</td>
+                        <td className="px-6 py-3 text-xs   text-text-tertiary">Ready for match</td>
                       </tr>
                     ))
                   )}
@@ -371,29 +372,29 @@ export default function DeveloperDashboard() {
       ) : (
         /* Billing tab */
         <div className="grid gap-6 lg:grid-cols-[1fr_0.8fr]">
-          <section className="rounded-xl border border-white/[0.06] bg-[#0c0c0d] p-6">
+          <section className="rounded-xl border border-white/[0.08] bg-[#0c0c0d] p-6">
             <div className="mb-6 flex items-start justify-between gap-4">
               <div>
-                <p className="text-[10px] font-semibold tracking-widest text-gray-600 uppercase">
+                <p className="text-[10px] font-semibold tracking-widest   text-text-tertiary uppercase">
                   Authentication
                 </p>
                 <h2 className="mt-1 text-lg font-semibold text-white">Bearer token</h2>
-                <p className="mt-2 text-xs text-gray-500">
+                <p className="mt-2 text-xs   text-text-tertiary">
                   Use this Supabase JWT with the CLI and matchmaker-protected API routes.
                 </p>
               </div>
-              <div className="flex size-9 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.03]">
-                <KeyRound className="size-4 text-gray-300" />
+              <div className="flex size-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
+                <KeyRound className="size-4 text-text-secondary" />
               </div>
             </div>
-            <label className="mb-2 block text-[10px] font-semibold uppercase tracking-widest text-gray-600">
+            <label className="mb-2 block text-[10px] font-semibold uppercase tracking-widest   text-text-tertiary">
               API Bearer Token
             </label>
             <input
               type="text"
               readOnly
               value={session.access_token}
-              className="mb-4 w-full rounded-lg border border-white/[0.06] bg-black/40 px-4 py-2.5 font-mono text-xs text-gray-400 outline-none focus:border-white/20"
+              className="mb-4 w-full rounded-lg border border-white/[0.08] bg-black/40 px-4 py-2.5 font-mono text-xs text-text-secondary outline-none focus:border-white/20"
             />
             <Button variant="primary" size="sm" onClick={handleCopyToken}>
               <CreditCard className="size-3.5" />
@@ -401,8 +402,8 @@ export default function DeveloperDashboard() {
             </Button>
           </section>
 
-          <section className="rounded-xl border border-white/[0.06] bg-[#0c0c0d] p-6">
-            <p className="text-[10px] font-semibold tracking-widest text-gray-600 uppercase">
+          <section className="rounded-xl border border-white/[0.08] bg-[#0c0c0d] p-6">
+            <p className="text-[10px] font-semibold tracking-widest   text-text-tertiary uppercase">
               Controls
             </p>
             <h2 className="mt-1 text-lg font-semibold text-white">MVP readiness</h2>
@@ -412,8 +413,8 @@ export default function DeveloperDashboard() {
                 ["Go matchmaker", "Live nodes and pods endpoints wired"],
                 ["Secure workers", "Token-based API access ready"],
               ].map(([label, value]) => (
-                <div key={label} className="flex items-center justify-between gap-4 rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-3">
-                  <span className="text-xs text-gray-500">{label}</span>
+                <div key={label} className="flex items-center justify-between gap-4 rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-3">
+                  <span className="text-xs   text-text-tertiary">{label}</span>
                   <span className="text-xs font-medium text-white">{value}</span>
                 </div>
               ))}
@@ -437,17 +438,17 @@ function MetricCard({
   helper?: string;
 }) {
   return (
-    <div className="rounded-xl border border-white/[0.06] bg-[#0c0c0d] p-5">
+    <div className="rounded-xl border border-white/[0.08] bg-[#0c0c0d] p-5">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-gray-600">{label}</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.15em]   text-text-tertiary">{label}</p>
           <div className="mt-2 text-2xl font-semibold tracking-tight text-white">{value}</div>
         </div>
-        <div className="flex size-9 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.03]">
-          <Icon className="size-4 text-gray-300" />
+        <div className="flex size-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
+          <Icon className="size-4 text-text-secondary" />
         </div>
       </div>
-      {helper && <p className="mt-3 text-[11px] text-gray-500">{helper}</p>}
+      {helper && <p className="mt-3 text-[11px]   text-text-tertiary">{helper}</p>}
     </div>
   );
 }

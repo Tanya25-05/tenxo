@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { Card } from "@/components/ui/Card";
 
 export default function UserPage() {
   const [session, setSession] = useState<any>(null);
@@ -17,19 +18,22 @@ export default function UserPage() {
   return (
     <div className="p-6">
       <div className="mx-auto max-w-2xl">
-        <h1 className="text-xl font-semibold tracking-tight text-white">Account</h1>
-        <div className="mt-4 rounded-xl border border-white/[0.06] bg-[#0c0c0d] p-5">
-          <div className="space-y-3 text-sm">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-text-tertiary">
+          Profile
+        </p>
+        <h1 className="mt-1 text-xl font-semibold tracking-tight text-text-primary">Account</h1>
+        <Card className="mt-4">
+          <div className="space-y-4 text-sm">
             <div>
-              <span className="text-xs font-medium text-gray-500">Email</span>
-              <p className="mt-0.5 text-gray-200">{user?.email || "—"}</p>
+              <span className="text-xs font-medium text-text-tertiary">Email</span>
+              <p className="mt-0.5 text-text-primary">{user?.email || "—"}</p>
             </div>
             <div>
-              <span className="text-xs font-medium text-gray-500">User ID</span>
-              <p className="mt-0.5 font-mono text-xs text-gray-400">{user?.id || "—"}</p>
+              <span className="text-xs font-medium text-text-tertiary">User ID</span>
+              <p className="mt-0.5 font-mono text-xs text-text-secondary">{user?.id || "—"}</p>
             </div>
           </div>
-        </div>
+        </Card>
       </div>
     </div>
   );

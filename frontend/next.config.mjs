@@ -2,7 +2,7 @@ import path from "path";
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: "export",
+  output: "standalone",
   images: { unoptimized: true },
   webpack(config) {
     config.resolve.alias["@"] = path.resolve(".");

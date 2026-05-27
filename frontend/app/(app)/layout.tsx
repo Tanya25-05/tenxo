@@ -5,20 +5,24 @@ import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   Activity,
+  Container,
   CreditCard,
   Cpu,
   LogOut,
   Network,
+  Search,
   Server,
+  ShoppingCart,
 } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import { cn } from "@/lib/utils";
 
 const navItems = [
-  { name: "Compute", icon: Cpu, path: "/app/developer", scope: ["developer"] },
-  { name: "API & Billing", icon: CreditCard, path: "/app/developer", scope: ["developer"] },
-  { name: "Hardware", icon: Server, path: "/app/provider", scope: ["provider"] },
-  { name: "Profile", icon: Activity, path: "/app/user", scope: ["developer", "provider"] },
+  { name: "Marketplace", icon: ShoppingCart, path: "/marketplace" },
+  { name: "Compute", icon: Cpu, path: "/developer" },
+  { name: "Billing", icon: CreditCard, path: "/billing" },
+  { name: "Hardware", icon: Server, path: "/provider" },
+  { name: "Profile", icon: Activity, path: "/user" },
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
@@ -26,6 +30,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [session, setSession] = useState<any>(null);
   const [checking, setChecking] = useState(true);
+  const [isMac, setIsMac] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -40,6 +45,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     return () => subscription.unsubscribe();
   }, [router]);
 
+  useEffect(() => {
+    setIsMac(typeof navigator !== "undefined" && navigator.platform.includes("Mac"));
+  }, []);
+
   const handleSignOut = async () => {
     await supabase.auth.signOut({ scope: "global" });
     router.replace("/");
@@ -47,7 +56,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   if (checking || !session) {
     return (
-      <div className="grid min-h-screen place-items-center text-sm text-gray-500">
+      <div className="grid min-h-screen place-items-center text-sm text-text-secondary">
         Verifying Tenxo session...
       </div>
     );
@@ -55,19 +64,23 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
-      <aside className="sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-white/[0.06] bg-[#09090b]/90 backdrop-blur-xl">
+      <aside className="sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-white/[0.08] bg-surface/90 backdrop-blur-xl">
         <div className="flex items-center gap-2.5 px-4 pt-4 pb-6">
-          <div className="flex size-8 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.05]">
-            <Network className="size-4 text-gray-300" />
+          <div className="flex size-8 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.05]">
+            <Network className="size-4 text-zinc-300" />
           </div>
           <div>
-            <div className="text-xs font-semibold tracking-[0.2em] text-white">TENXO</div>
-            <div className="text-[10px] tracking-[0.15em] text-gray-600">Compute Grid</div>
+            <div className="text-xs font-semibold tracking-[0.2em] text-text-primary">
+              TENXO
+            </div>
+            <div className="text-[10px] tracking-[0.15em] text-text-tertiary">
+              Compute Grid
+            </div>
           </div>
         </div>
 
-        <div className="mx-3 mb-4 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
-          <div className="flex items-center gap-2 text-xs font-medium text-gray-300">
+        <div className="mx-3 mb-4 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2.5">
+          <div className="flex items-center gap-2 text-xs font-medium text-zinc-300">
             <Activity className="size-3.5 text-emerald-400" />
             Secure relay active
           </div>
@@ -79,7 +92,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <nav className="flex-1 space-y-0.5 px-3">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const selected = pathname === item.path;
+            const selected = pathname === item.path || pathname.startsWith(item.path + "/");
             return (
               <Link
                 key={item.name}
@@ -87,8 +100,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
                 className={cn(
                   "flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium transition-all duration-200",
                   selected
-                    ? "border border-white/[0.08] bg-white/[0.06] text-white"
-                    : "text-gray-500 hover:bg-white/[0.03] hover:text-gray-300",
+                    ? "border border-white/[0.08] bg-white/[0.06] text-text-primary"
+                    : "text-text-tertiary hover:bg-white/[0.03] hover:text-text-primary",
                 )}
               >
                 <Icon className="size-4" />
@@ -98,14 +111,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           })}
         </nav>
 
-        <div className="border-t border-white/[0.06] px-3 py-4">
-          <div className="mb-3 flex items-center gap-2 rounded-lg border border-white/[0.06] px-3 py-2 text-[11px] text-gray-500">
-            <Network className="size-3.5" />
-            Zero-trust worker auth
+        <div className="border-t border-white/[0.08] px-3 py-4">
+          <div className="mb-3 flex items-center gap-2 rounded-lg border border-white/[0.08] px-3 py-2 text-[11px] text-text-tertiary">
+            <Search className="size-3.5" />
+            Press {isMac ? "⌘K" : "Ctrl+K"}
           </div>
           <button
             onClick={handleSignOut}
-            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium text-gray-500 transition-colors hover:bg-white/[0.03] hover:text-gray-300"
+            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium text-text-tertiary transition-colors hover:bg-white/[0.03] hover:text-text-primary"
           >
             <LogOut className="size-4" />
             Sign out
