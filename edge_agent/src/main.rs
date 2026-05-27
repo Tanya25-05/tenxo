@@ -600,13 +600,26 @@ fn main() -> Result<()> {
                 // ── Send result over WebSocket bridge ─────────────────
                 let reply = match result {
                     Ok(result_url) => {
-                        println!("Job {} completed successfully", payload.job_id.unwrap_or_default());
+                        let job_id = payload.job_id.clone();
+                        println!("Job {} completed successfully", job_id.as_deref().unwrap_or("?"));
                         serde_json::json!({
                             "type": "result",
                             "payload": {
-                                "job_id": payload.job_id,
+                                "job_id": job_id,
                                 "status": "done",
                                 "result_url": result_url,
+                            }
+                        })
+                    }
+                    Err(e) => {
+                        let job_id = payload.job_id.clone();
+                        eprintln!("Job failed: {}", e);
+                        serde_json::json!({
+                            "type": "result",
+                            "payload": {
+                                "job_id": job_id,
+                                "status": "error",
+                                "error": format!("{}", e),
                             }
                         })
                     }

@@ -1,4 +1,5 @@
 services:
+  # ─── Backend: Go Matchmaker ───────────────────────────────────────────────
   - type: web
     name: tenxo-api
     env: docker
@@ -34,6 +35,29 @@ services:
         sync: false
       - key: R2_BUCKET
         sync: false
+
+  # ─── Frontend: Next.js 14 ─────────────────────────────────────────────────
+  - type: web
+    name: tenxo-app
+    env: node
+    repo: https://github.com/Tanya25-05/tenxo
+    branch: main
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_PUBLIC_API_URL
+        value: https://tenxo-api.onrender.com
+      - key: NEXT_PUBLIC_WS_URL
+        value: wss://tenxo-api.onrender.com
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        value: https://cvuxfobevbarzkjfswhr.supabase.co
+      - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+        value: sb_publishable_Vbno_W45itCahi9Jk51hzA_dc-0A6QM
+      - key: NEXT_PUBLIC_RAZORPAY_KEY_ID
+        value: rzp_test_Su6XlqrDPdPRvZ
 
 databases:
   - name: tenxo-db

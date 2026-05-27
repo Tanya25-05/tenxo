@@ -72,9 +72,12 @@ export default function MarketplacePage() {
   }, []);
 
   useEffect(() => {
+    if (!session?.access_token) return;
     async function fetchNodes() {
       try {
-        const res = await fetch(`${API_URL}/nodes`);
+        const res = await fetch(`${API_URL}/nodes`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
         if (res.ok) {
           const data = await res.json();
           setNodes(data.nodes || MOCK_NODES);
@@ -88,7 +91,7 @@ export default function MarketplacePage() {
       }
     }
     fetchNodes();
-  }, []);
+  }, [session?.access_token]);
 
   const handleJobUpdate = useCallback((update: JobUpdate) => {
     if (update.status === "done") {
