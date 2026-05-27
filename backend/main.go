@@ -154,10 +154,22 @@ func main() {
 		http.HandleFunc("/billing/customer", cors(srv.authMiddleware(paymentHandler.HandleCreateCustomer)))
 		http.HandleFunc("/billing/setup-intent", cors(srv.authMiddleware(paymentHandler.HandleCreateSetupIntent)))
 		http.HandleFunc("/billing/verify-payment", cors(srv.authMiddleware(paymentHandler.HandleVerifyPayment)))
-		http.HandleFunc("/billing/payment-methods", cors(srv.authMiddleware(paymentHandler.HandleListPaymentMethods)))
+		http.HandleFunc("/billing/payment-methods", cors(srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			userID, _ := r.Context().Value(userIDKey).(string)
+			q := r.URL.Query()
+			q.Set("user_id", userID)
+			r.URL.RawQuery = q.Encode()
+			paymentHandler.HandleListPaymentMethods(w, r)
+		})))
 		http.HandleFunc("/billing/track-usage", cors(srv.authMiddleware(paymentHandler.HandleTrackUsage)))
 		http.HandleFunc("/billing/charge", cors(srv.authMiddleware(paymentHandler.HandleCharge)))
-		http.HandleFunc("/billing/usage", cors(srv.authMiddleware(paymentHandler.HandleGetUsage)))
+		http.HandleFunc("/billing/usage", cors(srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			userID, _ := r.Context().Value(userIDKey).(string)
+			q := r.URL.Query()
+			q.Set("user_id", userID)
+			r.URL.RawQuery = q.Encode()
+			paymentHandler.HandleGetUsage(w, r)
+		})))
 		http.HandleFunc("/billing/webhook", cors(paymentHandler.HandleWebhook)) // webhook has its own signature verification
 		log.Println("payment: Razorpay PAYG billing (card+UPI) — /billing/*")
 	} else {

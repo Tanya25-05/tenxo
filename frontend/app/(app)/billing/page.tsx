@@ -86,15 +86,16 @@ export default function BillingPage() {
 
       if (usageRes.ok) {
         const usageData = await usageRes.json();
-        setBalance(usageData.balance ?? "$0.00");
-        setUsageHours(usageData.hours ?? 0);
+        const unpaid = usageData.unpaid_cents ?? 0;
+        setBalance(`$${(unpaid / 100).toFixed(2)}`);
+        setUsageHours(parseFloat(usageData.gpu_hours ?? "0"));
       } else {
         setBalance("$0.00");
       }
 
       if (methodsRes.ok) {
         const methodsData = await methodsRes.json();
-        setPaymentMethods(methodsData.methods || []);
+        setPaymentMethods(methodsData.payment_methods || []);
       }
     } catch {
       setBalance("$0.00");

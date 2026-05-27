@@ -60,21 +60,21 @@ export default function DeveloperDashboard() {
   useEffect(() => {
     if (!session?.access_token) return;
     fetchNetworkStatus(session.access_token);
+    fetchPods(session.access_token);
   }, [session?.access_token]);
 
-  useEffect(() => {
-    async function fetchPods() {
-      try {
-        const res = await fetch(`${API_URL}/pods`);
-        if (res.ok) setPods(await res.json());
-      } catch {
-        // silent
-      } finally {
-        setLoading(false);
-      }
+  const fetchPods = async (token: string) => {
+    try {
+      const res = await fetch(`${API_URL}/jobs`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setPods(await res.json());
+    } catch {
+      // silent
+    } finally {
+      setLoading(false);
     }
-    fetchPods();
-  }, []);
+  };
 
   useEffect(() => {
     if (!meterRunning) return;
