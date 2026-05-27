@@ -22,21 +22,20 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	// "github.com/aws/aws-sdk-go-v2/feature/s3/presign"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/gpu-grid/matchmaker/payment"
 	"github.com/gpu-grid/matchmaker/signaling"
+	"github.com/gpu-grid/matchmaker/store"
 )
 
 type Server struct {
 	nc   *nats.Conn
 	js   nats.JetStreamContext
-	rdb  *redis.Client
+	st   store.Store
 	jwks keyfunc.Keyfunc
 	// WebSocket clients keyed by userID
 	wsClients map[string]map[*websocket.Conn]bool
@@ -78,23 +77,22 @@ type PresignResponse struct {
 
 func main() {
 	natsURL := getEnv("NATS_URL", nats.DefaultURL)
-	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
-	redisPassword := os.Getenv("REDIS_PASSWORD")
+	databaseURL := os.Getenv("DATABASE_URL")
 	streamName := getEnv("NATS_STREAM", "JOB_STREAM")
 	apiAddr := getEnv("API_ADDR", ":8080")
 
-	log.Printf("Starting matchmaker: NATS=%s Redis=%s", natsURL, redisAddr)
-
-	// Redis
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: redisPassword,
-		DB:       0,
-	})
-
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		log.Fatalf("redis ping failed: %v", err)
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL is required")
 	}
+
+	log.Printf("Starting matchmaker: NATS=%s", natsURL)
+
+	// PostgreSQL
+	st, err := store.NewPGStore(context.Background(), databaseURL)
+	if err != nil {
+		log.Fatalf("store setup failed: %v", err)
+	}
+	defer st.Close()
 
 	// NATS
 	nc, err := nats.Connect(natsURL)
@@ -112,13 +110,11 @@ func main() {
 		log.Fatalf("could not ensure JetStream stream: %v", err)
 	}
 
-// JWKS (Supabase) - optional
+	// JWKS (Supabase) - optional
 	var jwks keyfunc.Keyfunc
 	jwksURL := os.Getenv("SUPABASE_JWKS_URL")
 	if jwksURL != "" {
 		log.Printf("Loading JWKS from %s", jwksURL)
-		
-		// NewDefault automatically fetches the keys and sets up a background refresh
 		var err error
 		jwks, err = keyfunc.NewDefault([]string{jwksURL})
 		if err != nil {
@@ -129,39 +125,40 @@ func main() {
 		log.Printf("SUPABASE_JWKS_URL not set; JWT verification disabled")
 	}
 
-	srv := &Server{nc: nc, js: js, rdb: rdb, jwks: jwks, wsClients: make(map[string]map[*websocket.Conn]bool)}
+	srv := &Server{nc: nc, js: js, st: st, jwks: jwks, wsClients: make(map[string]map[*websocket.Conn]bool)}
 	go srv.listenHeartbeats(context.Background())
 	go srv.subscribeResults()
 
-	http.HandleFunc("/jobs", cors(srv.handleJobs))
-	http.HandleFunc("/nodes", cors(srv.handleNodes))
-	http.HandleFunc("/my-nodes", cors(srv.handleMyNodes))
-	http.HandleFunc("/presign", cors(srv.handlePresign))
-	http.HandleFunc("/jobs/", cors(srv.handleJobStatus))
-	http.HandleFunc("/storage/upload/", cors(srv.handleStorageUpload))
-	http.HandleFunc("/storage/result-upload/", cors(srv.handleStorageResultUpload))
-	http.HandleFunc("/storage/result/", cors(srv.handleStorageGet))
-	http.HandleFunc("/ws", cors(srv.handleWS))
+	// Public endpoints (no auth required)
 	http.HandleFunc("/health", cors(handleHealth))
+
+	// Authenticated endpoints
+	http.HandleFunc("/jobs", cors(srv.authMiddleware(srv.handleJobs)))
+	http.HandleFunc("/nodes", cors(srv.authMiddleware(srv.handleNodes)))
+	http.HandleFunc("/my-nodes", cors(srv.authMiddleware(srv.handleMyNodes)))
+	http.HandleFunc("/presign", cors(srv.authMiddleware(srv.handlePresign)))
+	http.HandleFunc("/jobs/", cors(srv.authMiddleware(srv.handleJobStatus)))
+	http.HandleFunc("/storage/upload/", cors(srv.authMiddleware(srv.handleStorageUpload)))
+	http.HandleFunc("/storage/result-upload/", cors(srv.authMiddleware(srv.handleStorageResultUpload)))
+	http.HandleFunc("/storage/result/", cors(srv.authMiddleware(srv.handleStorageGet)))
+	http.HandleFunc("/ws", cors(srv.authMiddleware(srv.handleWS)))
+	http.HandleFunc("/agent/heartbeat", cors(srv.authMiddleware(srv.handleAgentHeartbeat)))
 
 	// Zero-knowledge key exchange signaling (routes only, never inspects keys)
 	RegisterSignalingRoutes(http.DefaultServeMux)
 	signalStore.SetNATS(nc)
 
-	// Agent HTTP endpoints (no NATS port exposed — all via port 8080)
-	http.HandleFunc("/agent/heartbeat", cors(srv.handleAgentHeartbeat))
-
 	// Billing / Razorpay — Vast.ai/RunPod model (pay-as-you-go, card + UPI)
-	paymentHandler := payment.NewBillingHandler(rdb)
+	paymentHandler := payment.NewBillingHandler(st)
 	if paymentHandler.Enabled() {
-		http.HandleFunc("/billing/customer", cors(paymentHandler.HandleCreateCustomer))
-		http.HandleFunc("/billing/setup-intent", cors(paymentHandler.HandleCreateSetupIntent))
-		http.HandleFunc("/billing/verify-payment", cors(paymentHandler.HandleVerifyPayment))
-		http.HandleFunc("/billing/payment-methods", cors(paymentHandler.HandleListPaymentMethods))
-		http.HandleFunc("/billing/track-usage", cors(paymentHandler.HandleTrackUsage))
-		http.HandleFunc("/billing/charge", cors(paymentHandler.HandleCharge))
-		http.HandleFunc("/billing/usage", cors(paymentHandler.HandleGetUsage))
-		http.HandleFunc("/billing/webhook", cors(paymentHandler.HandleWebhook))
+		http.HandleFunc("/billing/customer", cors(srv.authMiddleware(paymentHandler.HandleCreateCustomer)))
+		http.HandleFunc("/billing/setup-intent", cors(srv.authMiddleware(paymentHandler.HandleCreateSetupIntent)))
+		http.HandleFunc("/billing/verify-payment", cors(srv.authMiddleware(paymentHandler.HandleVerifyPayment)))
+		http.HandleFunc("/billing/payment-methods", cors(srv.authMiddleware(paymentHandler.HandleListPaymentMethods)))
+		http.HandleFunc("/billing/track-usage", cors(srv.authMiddleware(paymentHandler.HandleTrackUsage)))
+		http.HandleFunc("/billing/charge", cors(srv.authMiddleware(paymentHandler.HandleCharge)))
+		http.HandleFunc("/billing/usage", cors(srv.authMiddleware(paymentHandler.HandleGetUsage)))
+		http.HandleFunc("/billing/webhook", cors(paymentHandler.HandleWebhook)) // webhook has its own signature verification
 		log.Println("payment: Razorpay PAYG billing (card+UPI) — /billing/*")
 	} else {
 		log.Println("payment: billing disabled — set RAZORPAY_KEY_ID to enable")
@@ -178,6 +175,13 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var hb HeartbeatPayload
 	if err := json.NewDecoder(r.Body).Decode(&hb); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -190,20 +194,15 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if hb.Status == "" {
 		hb.Status = "idle"
 	}
+	if hb.Owner == "" {
+		hb.Owner = userID
+	}
 
-	ctx := context.Background()
-	key := fmt.Sprintf("node:%s", hb.NodeID)
-	if err := s.rdb.Set(ctx, key, hb.Status, 60*time.Second).Err(); err != nil {
+	ctx := r.Context()
+	if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner); err != nil {
 		log.Printf("heartbeat: failed to set node state for %s: %v", hb.NodeID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
-	}
-
-	if hb.Owner != "" {
-		ownerKey := fmt.Sprintf("node_owner:%s", hb.NodeID)
-		if err := s.rdb.Set(ctx, ownerKey, hb.Owner, 0).Err(); err != nil {
-			log.Printf("heartbeat: failed to set node owner for %s: %v", hb.NodeID, err)
-		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -216,6 +215,89 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+type contextKey string
+
+const userIDKey contextKey = "user_id"
+
+func sanitizeJobID(id string) string {
+	id = filepath.Base(id)
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\\") {
+		return ""
+	}
+	return id
+}
+
+func extractToken(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+		return strings.TrimSpace(authHeader[7:])
+	}
+	if token := r.Header.Get("X-API-Key"); token != "" {
+		return token
+	}
+	if token := r.URL.Query().Get("token"); token != "" {
+		return token
+	}
+	return ""
+}
+
+func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := extractToken(r)
+		if token == "" {
+			http.Error(w, "missing auth token", http.StatusUnauthorized)
+			return
+		}
+		userID, err := s.validateAuth(token)
+		if err != nil {
+			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		ctx := context.WithValue(r.Context(), userIDKey, userID)
+		next(w, r.WithContext(ctx))
+	}
+}
+
+func (s *Server) requireJobOwner(next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := r.Context().Value(userIDKey).(string)
+		if !ok || userID == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		var jobID string
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/storage/upload/"):
+			jobID = strings.TrimPrefix(r.URL.Path, "/storage/upload/")
+		case strings.HasPrefix(r.URL.Path, "/storage/result-upload/"):
+			jobID = strings.TrimPrefix(r.URL.Path, "/storage/result-upload/")
+		case strings.HasPrefix(r.URL.Path, "/storage/result/"):
+			jobID = strings.TrimPrefix(r.URL.Path, "/storage/result/")
+		case strings.HasPrefix(r.URL.Path, "/jobs/"):
+			jobID = strings.TrimPrefix(r.URL.Path, "/jobs/")
+		}
+		jobID = sanitizeJobID(jobID)
+		if jobID == "" {
+			http.Error(w, "invalid job id", http.StatusBadRequest)
+			return
+		}
+
+		ctx := r.Context()
+		owner, err := s.st.JobGet(ctx, jobID, "owner")
+		if err != nil || owner == "" {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		if owner != userID {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		next(w, r, jobID)
+	}
 }
 
 func cors(next http.HandlerFunc) http.HandlerFunc {
@@ -254,11 +336,11 @@ func (s *Server) r2Client(ctx context.Context) (*s3.Client, string, error) {
 	secretKey := os.Getenv("R2_SECRET_ACCESS_KEY")
 	accountID := os.Getenv("R2_ACCOUNT_ID")
 	bucket := os.Getenv("R2_BUCKET")
-	
+
 	if accessKey == "" || secretKey == "" || accountID == "" || bucket == "" {
 		return nil, "", nil
 	}
-	
+
 	endpoint := os.Getenv("R2_ENDPOINT")
 	if endpoint == "" {
 		endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", accountID)
@@ -271,12 +353,12 @@ func (s *Server) r2Client(ctx context.Context) (*s3.Client, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	
+
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
 		o.UsePathStyle = true
 	})
-	
+
 	return client, bucket, nil
 }
 
@@ -337,23 +419,9 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth: Accept Authorization: Bearer <token> or X-API-Key: <token>
-	authHeader := r.Header.Get("Authorization")
-	token := ""
-	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-		token = strings.TrimSpace(authHeader[7:])
-	}
-	if token == "" {
-		token = r.Header.Get("X-API-Key")
-	}
-
-	if token == "" {
-		http.Error(w, "missing auth token", http.StatusUnauthorized)
-		return
-	}
-	userID, err := s.validateAuth(token)
-	if err != nil {
-		http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -371,16 +439,13 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		jobLink = payload.JobLink
 	}
 
-	jobID := payload.JobID
-	if jobID == "" {
-		jobID = fmt.Sprintf("job-%d", time.Now().UnixNano())
-	}
+	// Server-generated jobID — client-provided ID is ignored to prevent hijacking
+	jobID := fmt.Sprintf("job-%d", time.Now().UnixNano())
 
 	ctx := context.Background()
-	jobKey := fmt.Sprintf("job:%s", jobID)
 
 	// Merge new fields into existing job hash (don't blow away presign data)
-	updates := map[string]interface{}{
+	updates := map[string]string{
 		"owner":      userID,
 		"status":     "queued",
 		"upload_url": jobLink,
@@ -391,15 +456,15 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	if payload.SaltB64 != "" {
 		updates["salt_b64"] = payload.SaltB64
 	}
-	_, _ = s.rdb.HSet(ctx, jobKey, updates).Result()
+	_ = s.st.JobSet(ctx, jobID, updates)
 
 	// Fetch result_upload_url (set by presign or from env default)
-	resultUploadURL, _ := s.rdb.HGet(ctx, jobKey, "result_upload_url").Result()
+	resultUploadURL, _ := s.st.JobGet(ctx, jobID, "result_upload_url")
 	if resultUploadURL == "" {
 		// If no presign was done, build a default result upload URL
 		public := getEnv("PUBLIC_API_URL", "http://localhost:8080")
 		resultUploadURL = fmt.Sprintf("%s/storage/result-upload/%s", public, jobID)
-		_, _ = s.rdb.HSet(ctx, jobKey, "result_upload_url", resultUploadURL).Result()
+		_ = s.st.JobSet(ctx, jobID, map[string]string{"result_upload_url": resultUploadURL})
 	}
 
 	msg := map[string]string{
@@ -437,36 +502,26 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := context.Background()
-	var cursor uint64
-	var nodes []NodeInfo
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 
-	for {
-		keys, nextCursor, err := s.rdb.Scan(ctx, cursor, "node:*", 100).Result()
-		if err != nil {
-			http.Error(w, "failed to scan nodes", http.StatusInternalServerError)
-			return
-		}
-		cursor = nextCursor
+	ctx := r.Context()
+	nodeMap, err := s.st.GetAllNodes(ctx)
+	if err != nil {
+		http.Error(w, "failed to list nodes", http.StatusInternalServerError)
+		return
+	}
 
-		for _, key := range keys {
-			status, err := s.rdb.Get(ctx, key).Result()
-			if err != nil {
-				continue
-			}
-			ttl, err := s.rdb.TTL(ctx, key).Result()
-			if err != nil {
-				ttl = 0
-			}
-			nodes = append(nodes, NodeInfo{
-				NodeID: strings.TrimPrefix(key, "node:"),
-				Status: status,
-				TTL:    int64(ttl.Seconds()),
-			})
-		}
-		if cursor == 0 {
-			break
-		}
+	nodes := make([]NodeInfo, 0, len(nodeMap))
+	for _, n := range nodeMap {
+		nodes = append(nodes, NodeInfo{
+			NodeID: n.NodeID,
+			Status: n.Status,
+			TTL:    n.TTL,
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -479,75 +534,26 @@ func (s *Server) handleMyNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authHeader := r.Header.Get("Authorization")
-	tokenStr := ""
-	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-		tokenStr = strings.TrimSpace(authHeader[7:])
-	}
-	if tokenStr == "" {
-		tokenStr = r.Header.Get("X-API-Key")
-	}
-	if tokenStr == "" {
-		http.Error(w, "missing auth token", http.StatusUnauthorized)
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	token, err := s.parseAndValidateToken(tokenStr)
+	ctx := r.Context()
+	nodeMap, err := s.st.GetNodesByOwner(ctx, userID)
 	if err != nil {
-		http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
+		http.Error(w, "failed to list nodes", http.StatusInternalServerError)
 		return
 	}
 
-	var userID string
-	if claims, ok := token.Claims.(jwt.MapClaims); ok {
-		if sub, ok := claims["sub"].(string); ok {
-			userID = sub
-		}
-	}
-	if userID == "" {
-		http.Error(w, "missing sub claim in token", http.StatusUnauthorized)
-		return
-	}
-
-	ctx := context.Background()
-	var cursor uint64
-	var nodes []NodeInfo
-
-	for {
-		keys, nextCursor, err := s.rdb.Scan(ctx, cursor, "node:*", 100).Result()
-		if err != nil {
-			http.Error(w, "failed to scan nodes", http.StatusInternalServerError)
-			return
-		}
-		cursor = nextCursor
-
-		for _, key := range keys {
-			nodeID := strings.TrimPrefix(key, "node:")
-			ownerKey := fmt.Sprintf("node_owner:%s", nodeID)
-			owner, err := s.rdb.Get(ctx, ownerKey).Result()
-			if err != nil {
-				continue
-			}
-			if owner != userID {
-				continue
-			}
-			status, err := s.rdb.Get(ctx, key).Result()
-			if err != nil {
-				continue
-			}
-			ttl, err := s.rdb.TTL(ctx, key).Result()
-			if err != nil {
-				ttl = 0
-			}
-			nodes = append(nodes, NodeInfo{
-				NodeID: nodeID,
-				Status: status,
-				TTL:    int64(ttl.Seconds()),
-			})
-		}
-		if cursor == 0 {
-			break
-		}
+	nodes := make([]NodeInfo, 0, len(nodeMap))
+	for _, n := range nodeMap {
+		nodes = append(nodes, NodeInfo{
+			NodeID: n.NodeID,
+			Status: n.Status,
+			TTL:    n.TTL,
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -564,7 +570,8 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 var signalStore *signaling.SessionStore
 
 func initSignaling() {
-	signalStore = signaling.NewSessionStore()
+	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxo.onrender.com")
+	signalStore = signaling.NewSessionStore(allowedOrigin)
 }
 
 func RegisterSignalingRoutes(mux *http.ServeMux) {
@@ -608,38 +615,31 @@ func (s *Server) listenHeartbeats(ctx context.Context) {
 			hb.Status = "idle"
 		}
 
-		key := fmt.Sprintf("node:%s", hb.NodeID)
-		if err := s.rdb.Set(ctx, key, hb.Status, 60*time.Second).Err(); err != nil {
+		if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner); err != nil {
 			log.Printf("failed to update node state for %s: %v", hb.NodeID, err)
 			return
 		}
-		
-		if hb.Owner != "" {
-			ownerKey := fmt.Sprintf("node_owner:%s", hb.NodeID)
-			if err := s.rdb.Set(ctx, ownerKey, hb.Owner, 0).Err(); err != nil {
-				log.Printf("failed to set node owner for %s: %v", hb.NodeID, err)
-			}
-		}
+
 		log.Printf("node %s updated to %s", hb.NodeID, hb.Status)
 	})
 	if err != nil {
 		log.Fatalf("failed to subscribe to heartbeats: %v", err)
 	}
-	log.Printf("subscribed to heartbeats.> and tracking node state in Redis")
+	log.Printf("subscribed to heartbeats.> and tracking node state in PostgreSQL")
 }
 
 func (s *Server) validateAuth(token string) (string, error) {
 	if token == "" {
 		return "", errors.New("empty token")
 	}
-	
+
 	h := sha256.Sum256([]byte(token))
 	hexk := hex.EncodeToString(h[:])
 	ctx := context.Background()
-	if uid, err := s.rdb.Get(ctx, fmt.Sprintf("api_key:%s", hexk)).Result(); err == nil {
+	if uid, err := s.st.GetAPIKeyUser(ctx, hexk); err == nil {
 		return uid, nil
 	}
-	
+
 	if s.jwks != nil {
 		t, err := s.parseAndValidateToken(token)
 		if err != nil {
@@ -660,24 +660,10 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	authHeader := r.Header.Get("Authorization")
-	token := ""
-	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-		token = strings.TrimSpace(authHeader[7:])
-	}
-	if token == "" {
-		token = r.Header.Get("X-API-Key")
-	}
-	if token == "" {
-		token = r.URL.Query().Get("token")
-	}
-	if token == "" {
-		http.Error(w, "missing auth token", http.StatusUnauthorized)
-		return
-	}
-	userID, err := s.validateAuth(token)
-	if err != nil {
-		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -703,10 +689,8 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jobID := req.JobID
-	if jobID == "" {
-		jobID = fmt.Sprintf("job-%d", time.Now().UnixNano())
-	}
+	// Server-generated jobID — client-provided ID is ignored to prevent hijacking
+	jobID := fmt.Sprintf("job-%d", time.Now().UnixNano())
 
 	ctx := context.Background()
 	uploadURL, resultUploadURL, resultURL, err := s.getUploadURLs(ctx, jobID)
@@ -715,15 +699,14 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobKey := fmt.Sprintf("job:%s", jobID)
-	_, _ = s.rdb.HSet(ctx, jobKey, map[string]interface{}{
+	_ = s.st.JobSet(ctx, jobID, map[string]string{
 		"owner":             userID,
 		"status":            "created",
 		"upload_url":        uploadURL,
 		"result_upload_url": resultUploadURL,
 		"result_url":        resultURL,
 		"enc_key_b64":       keyB64,
-	}).Result()
+	})
 
 	resp := PresignResponse{
 		UploadURL:       uploadURL,
@@ -737,16 +720,27 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
-	jobID := strings.TrimPrefix(r.URL.Path, "/storage/upload/")
-	if jobID == "" {
-		http.Error(w, "missing job id", http.StatusBadRequest)
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	ctx := context.Background()
-	jobKey := fmt.Sprintf("job:%s", jobID)
-	exists, err := s.rdb.Exists(ctx, jobKey).Result()
-	if err != nil || exists == 0 {
-		http.Error(w, "unknown job id", http.StatusNotFound)
+
+	rawID := strings.TrimPrefix(r.URL.Path, "/storage/upload/")
+	jobID := sanitizeJobID(rawID)
+	if jobID == "" {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	owner, err := s.st.JobGet(ctx, jobID, "owner")
+	if err != nil || owner == "" {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+	if owner != userID {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -781,7 +775,7 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = s.rdb.HSet(ctx, jobKey, "status", "uploaded", "upload_path", filePath).Result()
+	_ = s.st.JobSet(ctx, jobID, map[string]string{"status": "uploaded", "upload_path": filePath})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -790,16 +784,28 @@ func (s *Server) handleStorageResultUpload(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	jobID := strings.TrimPrefix(r.URL.Path, "/storage/result-upload/")
-	if jobID == "" {
-		http.Error(w, "missing job id", http.StatusBadRequest)
+
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	ctx := context.Background()
-	jobKey := fmt.Sprintf("job:%s", jobID)
-	exists, err := s.rdb.Exists(ctx, jobKey).Result()
-	if err != nil || exists == 0 {
-		http.Error(w, "unknown job id", http.StatusNotFound)
+
+	rawID := strings.TrimPrefix(r.URL.Path, "/storage/result-upload/")
+	jobID := sanitizeJobID(rawID)
+	if jobID == "" {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	owner, err := s.st.JobGet(ctx, jobID, "owner")
+	if err != nil || owner == "" {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+	if owner != userID {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -818,7 +824,7 @@ func (s *Server) handleStorageResultUpload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	_, _ = s.rdb.HSet(ctx, jobKey, "status", "result_uploaded", "result_path", filePath).Result()
+	_ = s.st.JobSet(ctx, jobID, map[string]string{"status": "result_uploaded", "result_path": filePath})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -827,19 +833,33 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	jobID := strings.TrimPrefix(r.URL.Path, "/storage/result/")
-	if jobID == "" {
-		http.Error(w, "missing job id", http.StatusBadRequest)
+
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	ctx := context.Background()
-	jobKey := fmt.Sprintf("job:%s", jobID)
-	data, err := s.rdb.HGetAll(ctx, jobKey).Result()
+
+	rawID := strings.TrimPrefix(r.URL.Path, "/storage/result/")
+	jobID := sanitizeJobID(rawID)
+	if jobID == "" {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	data, err := s.st.JobGetAll(ctx, jobID)
 	if err != nil || len(data) == 0 {
 		http.Error(w, "unknown job id", http.StatusNotFound)
 		return
 	}
-	
+
+	owner, ok := data["owner"]
+	if !ok || owner == "" || owner != userID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	var path string
 	if p, ok := data["result_path"]; ok && p != "" {
 		path = p
@@ -858,22 +878,36 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	path := strings.TrimPrefix(r.URL.Path, "/jobs/")
-	if strings.HasSuffix(path, "/status") {
-		path = strings.TrimSuffix(path, "/status")
-	}
-	jobID := strings.Trim(path, "/")
-	if jobID == "" {
-		http.Error(w, "missing job id", http.StatusBadRequest)
+
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	ctx := context.Background()
-	jobKey := fmt.Sprintf("job:%s", jobID)
-	data, err := s.rdb.HGetAll(ctx, jobKey).Result()
+
+	rawPath := strings.TrimPrefix(r.URL.Path, "/jobs/")
+	if strings.HasSuffix(rawPath, "/status") {
+		rawPath = strings.TrimSuffix(rawPath, "/status")
+	}
+	jobID := sanitizeJobID(strings.Trim(rawPath, "/"))
+	if jobID == "" {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	data, err := s.st.JobGetAll(ctx, jobID)
 	if err != nil || len(data) == 0 {
 		http.Error(w, "unknown job id", http.StatusNotFound)
 		return
 	}
+
+	owner, ok := data["owner"]
+	if !ok || owner == "" || owner != userID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(data)
 }
@@ -886,15 +920,14 @@ func (s *Server) subscribeResults() {
 		status, _ := payload["status"].(string)
 		resultURL, _ := payload["result_url"].(string)
 		ctx := context.Background()
-		jobKey := fmt.Sprintf("job:%s", jobID)
 		if jobID != "" {
 			if status != "" {
-				_, _ = s.rdb.HSet(ctx, jobKey, "status", status).Result()
+				_ = s.st.JobSet(ctx, jobID, map[string]string{"status": status})
 			}
 			if resultURL != "" {
-				_, _ = s.rdb.HSet(ctx, jobKey, "result_url", resultURL).Result()
+				_ = s.st.JobSet(ctx, jobID, map[string]string{"result_url": resultURL})
 			}
-			owner, _ := s.rdb.HGet(ctx, jobKey, "owner").Result()
+			owner, _ := s.st.JobGet(ctx, jobID, "owner")
 			if owner != "" {
 				s.sendWS(owner, string(msg.Data))
 			}
@@ -926,28 +959,27 @@ func (s *Server) sendWS(userID, payload string) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	authHeader := r.Header.Get("Authorization")
-	token := ""
-	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-		token = strings.TrimSpace(authHeader[7:])
-	}
-	if token == "" {
-		token = r.Header.Get("X-API-Key")
-	}
-	if token == "" {
-		token = r.URL.Query().Get("token")
-	}
-	if token == "" {
-		http.Error(w, "missing auth token", http.StatusUnauthorized)
-		return
-	}
-	userID, err := s.validateAuth(token)
-	if err != nil {
-		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxo.onrender.com")
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" || allowedOrigin == "*" {
+				return true
+			}
+			for _, o := range strings.Split(allowedOrigin, ",") {
+				if strings.TrimSpace(o) == origin {
+					return true
+				}
+			}
+			return false
+		},
+	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		http.Error(w, "upgrade failed: "+err.Error(), http.StatusInternalServerError)

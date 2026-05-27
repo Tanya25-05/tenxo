@@ -38,6 +38,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,23 +52,23 @@ import (
 // TeeQuote is the AMD SEV-SNP attestation report.
 // The matchmaker stores and forwards it without interpretation.
 type TeeQuote struct {
-	ReportDataB64 string   `json:"report_data_b64"`
-	MeasurementB64 string  `json:"measurement_b64"`
-	ChipIDB64     string   `json:"chip_id_b64"`
-	SignatureB64  string   `json:"signature_b64"`
-	CertChainB64  []string `json:"cert_chain_b64"`
+	ReportDataB64  string   `json:"report_data_b64"`
+	MeasurementB64 string   `json:"measurement_b64"`
+	ChipIDB64      string   `json:"chip_id_b64"`
+	SignatureB64   string   `json:"signature_b64"`
+	CertChainB64   []string `json:"cert_chain_b64"`
 }
 
 // Session represents one ECDH key exchange session.
 type Session struct {
-	ID            string        `json:"id"`
-	AgentPubKey   string        `json:"agent_pub_key,omitempty"`
-	ClientPubKey  string        `json:"client_pub_key,omitempty"`
-	AgentQuote    *TeeQuote     `json:"agent_quote,omitempty"`
-	AgentConn     *websocket.Conn `json:"-"`
-	ClientConn    *websocket.Conn `json:"-"`
-	CreatedAt     time.Time     `json:"created_at"`
-	done          chan struct{}
+	ID           string          `json:"id"`
+	AgentPubKey  string          `json:"agent_pub_key,omitempty"`
+	ClientPubKey string          `json:"client_pub_key,omitempty"`
+	AgentQuote   *TeeQuote       `json:"agent_quote,omitempty"`
+	AgentConn    *websocket.Conn `json:"-"`
+	ClientConn   *websocket.Conn `json:"-"`
+	CreatedAt    time.Time       `json:"created_at"`
+	done         chan struct{}
 }
 
 // WSMessage is the generic WebSocket frame.
@@ -92,11 +93,22 @@ func (ss *SessionStore) SetNATS(nc *nats.Conn) {
 }
 
 // NewSessionStore creates a new session store with a WebSocket upgrader.
-func NewSessionStore() *SessionStore {
+func NewSessionStore(allowedOrigin string) *SessionStore {
 	return &SessionStore{
 		sessions: make(map[string]*Session),
 		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
+			CheckOrigin: func(r *http.Request) bool {
+				origin := r.Header.Get("Origin")
+				if origin == "" || allowedOrigin == "*" {
+					return true
+				}
+				for _, o := range strings.Split(allowedOrigin, ",") {
+					if strings.TrimSpace(o) == origin {
+						return true
+					}
+				}
+				return false
+			},
 		},
 	}
 }

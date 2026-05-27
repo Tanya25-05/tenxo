@@ -9,8 +9,7 @@ mkdir -p "$NATS_STORE"
 nats-server \
   --port "$NATS_PORT" \
   --jetstream \
-  --store_dir "$NATS_STORE" \
-  --max_pending 65536 &
+  --store_dir "$NATS_STORE" &
 
 NATS_PID=$!
 

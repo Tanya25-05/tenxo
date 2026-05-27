@@ -12,10 +12,9 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/gpu-grid/matchmaker/store"
 )
 
 type Config struct {
@@ -26,21 +25,21 @@ type Config struct {
 
 type BillingHandler struct {
 	client *http.Client
-	rdb    *redis.Client
+	st     store.Store
 	cfg    Config
 }
 
-func NewBillingHandler(rdb *redis.Client) *BillingHandler {
+func NewBillingHandler(st store.Store) *BillingHandler {
 	keyID := os.Getenv("RAZORPAY_KEY_ID")
 	keySecret := os.Getenv("RAZORPAY_KEY_SECRET")
 	whSecret := os.Getenv("RAZORPAY_WEBHOOK_SECRET")
 	if keyID == "" || keySecret == "" {
 		log.Println("payment: RAZORPAY_KEY_ID/SECRET not set — billing disabled")
-		return &BillingHandler{rdb: rdb}
+		return &BillingHandler{st: st}
 	}
 	return &BillingHandler{
 		client: &http.Client{Timeout: 30 * time.Second},
-		rdb:    rdb,
+		st:     st,
 		cfg:    Config{KeyID: keyID, KeySecret: keySecret, WebhookSecret: whSecret},
 	}
 }
@@ -122,12 +121,18 @@ const custPrefix = "rzp_customer:"
 const tokenPrefix = "rzp_token:"
 
 func (h *BillingHandler) getCustomerID(ctx context.Context, userID string) string {
-	id, _ := h.rdb.Get(ctx, custPrefix+userID).Result()
+	id, err := h.st.BillingGetCustomer(ctx, userID)
+	if err != nil {
+		return ""
+	}
 	return id
 }
 
 func (h *BillingHandler) getTokenID(ctx context.Context, userID string) string {
-	tok, _ := h.rdb.Get(ctx, tokenPrefix+userID).Result()
+	tok, err := h.st.BillingGetToken(ctx, userID)
+	if err != nil {
+		return ""
+	}
 	return tok
 }
 
@@ -146,35 +151,30 @@ func (h *BillingHandler) getOrCreateCustomer(ctx context.Context, userID, email 
 	}
 	cid, _ := resp["id"].(string)
 	if cid != "" {
-		h.rdb.Set(ctx, custPrefix+userID, cid, 0)
+		h.st.BillingSetCustomer(ctx, userID, cid)
 	}
 	return cid
 }
 
 func (h *BillingHandler) getTotalPaid(ctx context.Context, userID string) int64 {
-	totalKey := fmt.Sprintf("usage_total:%s", userID)
-	paidStr, err := h.rdb.HGet(ctx, totalKey, "total_paid_cents").Result()
+	_, paid, err := h.st.BillingGetTotal(ctx, userID)
 	if err != nil {
 		return 0
 	}
-	p, _ := strconv.ParseInt(paidStr, 10, 64)
-	return p
+	return paid
 }
 
 func (h *BillingHandler) notifyUser(ctx context.Context, userID string, data map[string]string) {
 	msg, _ := json.Marshal(data)
-	h.rdb.Publish(ctx, "notify:"+userID, string(msg))
+	log.Printf("payment: notify %s: %s", userID, string(msg))
 }
 
 func (h *BillingHandler) getUserIDbyCustomer(ctx context.Context, custID string) string {
-	iter := h.rdb.Scan(ctx, 0, custPrefix+"*", 100).Iterator()
-	for iter.Next(ctx) {
-		val, err := h.rdb.Get(ctx, iter.Val()).Result()
-		if err == nil && val == custID {
-			return iter.Val()[len(custPrefix):]
-		}
+	userID, err := h.st.BillingFindUserByCustomer(ctx, custID)
+	if err != nil {
+		return ""
 	}
-	return ""
+	return userID
 }
 
 // ─── POST /billing/customer ───────────────────────────────────────────────
@@ -285,7 +285,7 @@ func (h *BillingHandler) HandleVerifyPayment(w http.ResponseWriter, r *http.Requ
 	}
 
 	ctx := context.Background()
-	h.rdb.Set(ctx, tokenPrefix+req.UserID, tokenID, 0)
+	h.st.BillingSetToken(ctx, req.UserID, tokenID)
 	log.Printf("payment: user %s saved token %s", req.UserID, tokenID)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -369,26 +369,18 @@ func (h *BillingHandler) HandleTrackUsage(w http.ResponseWriter, r *http.Request
 		return
 	}
 	ctx := context.Background()
-	usageKey := fmt.Sprintf("usage:%s:%s", req.UserID, req.JobID)
 
 	switch req.Action {
 	case "start":
-		h.rdb.HSet(ctx, usageKey, "started", time.Now().Unix(), "user_id", req.UserID)
-		h.rdb.Expire(ctx, usageKey, 72*time.Hour)
+		h.st.UsageStart(ctx, req.UserID, req.JobID)
 		w.Write([]byte(`{"tracked": "start"}`))
 	case "stop":
-		startedStr, _ := h.rdb.HGet(ctx, usageKey, "started").Result()
-		var started int64
-		fmt.Sscanf(startedStr, "%d", &started)
-		if started == 0 {
+		elapsed, err := h.st.UsageStop(ctx, req.UserID, req.JobID)
+		if err != nil {
 			http.Error(w, "job not found", http.StatusNotFound)
 			return
 		}
-		elapsed := time.Now().Unix() - started
-		h.rdb.HSet(ctx, usageKey, "stopped", time.Now().Unix(), "elapsed_seconds", elapsed)
-		h.rdb.Expire(ctx, usageKey, 72*time.Hour)
-		totalKey := fmt.Sprintf("usage_total:%s", req.UserID)
-		h.rdb.HIncrBy(ctx, totalKey, "gpu_seconds", elapsed)
+		h.st.BillingIncrGPU(ctx, req.UserID, elapsed)
 		h.autoChargeIfNeeded(ctx, req.UserID)
 		w.Write([]byte(`{"tracked": "stop"}`))
 	default:
@@ -409,12 +401,16 @@ func (h *BillingHandler) HandleGetUsage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ctx := context.Background()
-	totalKey := fmt.Sprintf("usage_total:%s", userID)
-	secsStr, _ := h.rdb.HGet(ctx, totalKey, "gpu_seconds").Result()
-	unpaidStr, _ := h.rdb.HGet(ctx, totalKey, "unpaid_cents").Result()
-	var secs, unpaid int64
-	fmt.Sscanf(secsStr, "%d", &secs)
-	fmt.Sscanf(unpaidStr, "%d", &unpaid)
+	secs, paidCents, err := h.st.BillingGetTotal(ctx, userID)
+	var unpaid int64
+	if err == nil {
+		hourlyRate := int64(15)
+		chargeable := (secs * hourlyRate) / 3600
+		unpaid = chargeable - paidCents
+		if unpaid < 0 {
+			unpaid = 0
+		}
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"gpu_seconds":       secs,
 		"gpu_hours":         fmt.Sprintf("%.2f", float64(secs)/3600),
@@ -492,10 +488,9 @@ func (h *BillingHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		amount, _ := ent["amount"].(float64)
 		amountCents := int64(amount) / 100
-		totalKey := fmt.Sprintf("usage_total:%s", userID)
 		if amountCents > 0 {
-			h.rdb.HIncrBy(ctx, totalKey, "total_paid_cents", amountCents)
-			h.rdb.HSet(ctx, totalKey, "last_charge", time.Now().Unix())
+			h.st.BillingIncrPaid(ctx, userID, amountCents)
+			h.st.BillingSetLastCharge(ctx, userID)
 		}
 		log.Printf("payment: captured %d for user %s", amountCents, userID)
 
@@ -523,14 +518,12 @@ func (h *BillingHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 // ─── Internal ─────────────────────────────────────────────────────────────
 
 func (h *BillingHandler) autoChargeIfNeeded(ctx context.Context, userID string) {
-	totalKey := fmt.Sprintf("usage_total:%s", userID)
-	gpuSecsStr, _ := h.rdb.HGet(ctx, totalKey, "gpu_seconds").Result()
-	var gpuSecs int64
-	fmt.Sscanf(gpuSecsStr, "%d", &gpuSecs)
-
+	gpuSecs, paid, err := h.st.BillingGetTotal(ctx, userID)
+	if err != nil {
+		return
+	}
 	hourlyRate := int64(15)
 	chargeable := (gpuSecs * hourlyRate) / 3600
-	paid := h.getTotalPaid(ctx, userID)
 	unpaid := chargeable - paid
 
 	if unpaid >= 100 {
@@ -556,14 +549,9 @@ func (h *BillingHandler) chargeUser(ctx context.Context, userID string) (map[str
 		return nil, fmt.Errorf("no saved payment method for user %s", userID)
 	}
 
-	totalKey := fmt.Sprintf("usage_total:%s", userID)
-	gpuSecsStr, _ := h.rdb.HGet(ctx, totalKey, "gpu_seconds").Result()
-	var gpuSecs int64
-	fmt.Sscanf(gpuSecsStr, "%d", &gpuSecs)
-
+	gpuSecs, paid, _ := h.st.BillingGetTotal(ctx, userID)
 	hourlyRate := int64(15)
 	chargeable := (gpuSecs * hourlyRate) / 3600
-	paid := h.getTotalPaid(ctx, userID)
 	amountCents := chargeable - paid
 	if amountCents < 50 {
 		amountCents = 50
