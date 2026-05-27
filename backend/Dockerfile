@@ -1,8 +1,8 @@
 FROM golang:1.25-alpine AS builder
 WORKDIR /app
-COPY go.mod go.sum ./
+COPY backend/go.mod backend/go.sum ./
 RUN go mod download
-COPY . .
+COPY backend/ .
 RUN CGO_ENABLED=0 go build -o /matchmaker .
 
 FROM alpine:3.19
@@ -15,7 +15,7 @@ RUN set -eux; \
 	tar -xzf /tmp/nats.tar.gz -C /usr/local/bin --strip-components=1 && \
 	rm /tmp/nats.tar.gz
 COPY --from=builder /matchmaker /matchmaker
-COPY start.sh /start.sh
+COPY backend/start.sh /start.sh
 RUN chmod +x /start.sh
 EXPOSE 8080
 CMD ["/start.sh"]
