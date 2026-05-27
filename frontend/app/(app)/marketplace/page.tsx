@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Cpu,
   FlaskConical,
@@ -52,6 +52,8 @@ const REGIONS = ["us-east", "us-west", "eu-west", "eu-central", "ap-south", "ap-
 export default function MarketplacePage() {
   const { toast } = useToast();
   const [session, setSession] = useState<any>(null);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [nodes, setNodes] = useState<GpuNode[]>([]);
   const [loading, setLoading] = useState(true);
@@ -93,11 +95,42 @@ export default function MarketplacePage() {
     fetchNodes();
   }, [session?.access_token]);
 
+  const trackUsage = async (jobId: string, action: "start" | "stop") => {
+    if (!session?.access_token) return;
+    try {
+      await fetch(`${API_URL}/billing/track-usage`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ user_id: session.user.id, job_id: jobId, action }),
+      });
+    } catch {
+      // silent — billing is best-effort
+    }
+  };
+
   const handleJobUpdate = useCallback((update: JobUpdate) => {
+    const tok = sessionRef.current?.access_token;
     if (update.status === "done") {
       toast(`Job ${update.job_id.slice(0, 12)}... completed`, "success");
+      if (tok) {
+        fetch(`${API_URL}/billing/track-usage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
+          body: JSON.stringify({ user_id: sessionRef.current?.user.id, job_id: update.job_id, action: "stop" }),
+        }).catch(() => {});
+      }
     } else if (update.status === "error") {
       toast(`Deploy failed: ${update.error || "unknown error"}`, "error");
+      if (tok) {
+        fetch(`${API_URL}/billing/track-usage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
+          body: JSON.stringify({ user_id: sessionRef.current?.user.id, job_id: update.job_id, action: "stop" }),
+        }).catch(() => {});
+      }
     }
     setDeployingId(null);
   }, [toast]);
@@ -140,6 +173,7 @@ export default function MarketplacePage() {
 
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
+      trackUsage(data.job_id, "start");
       toast(`Deploying on ${node.gpu_model} — ${data.status}`, "info");
     } catch (e: any) {
       toast(`Deploy failed: ${e.message}`, "error");

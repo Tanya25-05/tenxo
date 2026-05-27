@@ -519,7 +519,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "queued", "subject": "jobs"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "queued", "job_id": jobID, "subject": "jobs"})
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
