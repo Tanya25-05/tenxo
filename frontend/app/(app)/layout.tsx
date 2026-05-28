@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
+import { Logo } from "@/components/ui/Logo";
 import {
   Activity,
   BookOpen,
@@ -10,7 +11,6 @@ import {
   CreditCard,
   Cpu,
   LogOut,
-  Network,
   Search,
   Server,
   ShoppingCart,
@@ -68,8 +68,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-screen">
       <aside className="sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-white/[0.08] bg-surface/90 backdrop-blur-xl">
         <div className="flex items-center gap-2.5 px-4 pt-4 pb-6">
-          <div className="flex size-8 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.05]">
-            <Network className="size-4 text-zinc-300" />
+          <div className="flex size-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
+            <Logo size={20} gradient />
           </div>
           <div>
             <div className="text-xs font-semibold tracking-[0.2em] text-text-primary">

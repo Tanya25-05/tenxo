@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Logo } from "@/components/ui/Logo";
 
 const navLinks = [
   { href: "/features", label: "Product" },
@@ -13,9 +14,7 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
       <header className="fixed top-0 z-50 h-14 w-full border-b border-white/[0.08] bg-background/70 backdrop-blur-xl">
         <div className="mx-auto flex h-full max-w-[1100px] items-center justify-between px-6">
           <Link href="/" className="flex items-center gap-2.5">
-            <span className="flex size-7 items-center justify-center rounded-md bg-white text-[11px] font-bold text-black">
-              T
-            </span>
+            <Logo size={28} className="text-white" />
             <span className="text-sm font-semibold tracking-tight text-text-primary">
               tenxo
             </span>
@@ -57,9 +56,7 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
           <div className="mb-10 flex flex-col gap-8 sm:flex-row sm:items-start sm:justify-between">
             <div className="max-w-xs">
               <div className="mb-3 flex items-center gap-2">
-                <span className="flex size-7 items-center justify-center rounded-md bg-white text-[11px] font-bold text-black">
-                  T
-                </span>
+                <Logo size={28} className="text-white" />
                 <span className="text-sm font-semibold tracking-tight text-text-primary">
                   tenxo
                 </span>

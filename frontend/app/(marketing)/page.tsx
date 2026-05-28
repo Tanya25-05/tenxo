@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { HeroGlow } from "@/components/ui/HeroGlow";
 import {
   ArrowUpRight,
   Cpu,
@@ -95,21 +96,8 @@ export default function LandingPage() {
       {/* ─── 1. HERO ─── */}
       <section className="relative py-section">
         <div className="pointer-events-none absolute inset-0 bg-hero-glow" />
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center overflow-hidden">
-          <div className="grid grid-cols-6 gap-5 opacity-40 sm:grid-cols-8 sm:gap-7">
-            {Array.from({ length: 48 }).map((_, i) => (
-              <div
-                key={i}
-                className="size-[5px] rounded-full bg-white sm:size-[6px]"
-                style={{
-                  animation: `dot-pulse 2.5s ease-in-out infinite`,
-                  animationDelay: `${(i % 8) * 0.12 + Math.floor(i / 8) * 0.08}s`,
-                }}
-              />
-            ))}
-          </div>
-        </div>
-        <div className="relative mx-auto max-w-3xl text-center">
+        <HeroGlow>
+          <div className="relative mx-auto max-w-3xl text-center">
           <Badge variant="accent" className="mb-6">
             Zero-trust GPU grid
           </Badge>
@@ -140,6 +128,7 @@ export default function LandingPage() {
             to navigate
           </p>
         </div>
+        </HeroGlow>
       </section>
 
       {/* ─── 2. STATS BAR ─── */}

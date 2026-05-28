@@ -9,6 +9,10 @@ export const metadata: Metadata = {
   title: "Tenxo — Decentralized GPU Infrastructure",
   description:
     "Decentralized GPU compute secured by TEE. Deploy AI workloads on idle GPUs across a zero-trust peer-to-peer grid at up to 50% less than centralized clouds.",
+  icons: {
+    icon: "/icon.svg",
+    apple: "/icon.svg",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
