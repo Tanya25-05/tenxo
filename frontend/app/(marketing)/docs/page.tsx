@@ -333,10 +333,10 @@ curl -X PUT "$UPLOAD_URL" \
                 and connects to the Tenxo matchmaker.
               </p>
               <div className="mt-3 rounded-xl border border-white/[0.08] bg-[#0c0c0d] p-4">
-                <pre className="overflow-x-auto text-[11px] leading-relaxed text-text-secondary font-mono">curl -sSL https://tenxo.com/install.sh | bash -s -- --token $TENXO_TOKEN</pre>
+                <pre className="overflow-x-auto text-[11px] leading-relaxed text-text-secondary font-mono">curl -fsSL https://tenxo-api.onrender.com/install.sh | bash -s -- --owner YOUR_USER_ID</pre>
               </div>
               <p className="mt-3 text-xs text-text-tertiary">
-                Your provider token is available in the{" "}
+                Your user ID is available in the{" "}
                 <a href="/provider" className="text-accent-purple hover:text-accent-neon">Provider Console</a>{" "}
                 after signing in.
               </p>
@@ -643,7 +643,7 @@ tenxo download job-a1b2c3d4`}</pre>
             {[
               {
                 q: "Agent won't connect — 'unauthorized' error",
-                a: "Verify your provider token is correct. Generate a new one in the Provider Console if needed. Tokens use the txn_ prefix.",
+                a: "Verify your user ID is correct. Find it in the Provider Console after signing in. Provider accounts use your Supabase user ID.",
               },
               {
                 q: "Node shows 'unverified' TEE status",

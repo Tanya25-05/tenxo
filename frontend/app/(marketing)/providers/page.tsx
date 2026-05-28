@@ -31,7 +31,7 @@ export default function ProvidersPage() {
           <p className="mb-3 text-xs font-medium text-text-tertiary">Host onboarding</p>
           <h2 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">One command to connect a worker</h2>
           <p className="mt-3 text-sm leading-relaxed text-text-tertiary">
-            Install the Rust agent, authenticate with your provider token, and start sending heartbeat availability into the Tenxo matchmaker.
+            Install the Rust agent, authenticate with your account ID, and start sending heartbeat availability into the Tenxo matchmaker.
           </p>
           <div className="mt-6 flex flex-wrap gap-2">
             {checks.map((c) => (
@@ -49,11 +49,11 @@ export default function ProvidersPage() {
             tenxo host install
           </div>
           <pre className="mb-4 overflow-x-auto rounded-lg border border-white/[0.08] bg-black/40 p-4 text-xs text-text-secondary font-mono leading-relaxed">
-curl -sSL https://tenxo.com/install.sh | bash -s -- --token $TENXO_TOKEN
+curl -fsSL https://tenxo-api.onrender.com/install.sh | bash -s -- --owner YOUR_USER_ID
           </pre>
           <Button variant="secondary" size="sm">
             <Copy className="size-3.5" />
-            Get host token
+            Copy command
           </Button>
         </div>
       </section>

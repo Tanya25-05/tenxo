@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -32,6 +33,14 @@ import (
 	"github.com/gpu-grid/matchmaker/signaling"
 	"github.com/gpu-grid/matchmaker/store"
 )
+
+//go:embed install.sh
+var installScript []byte
+
+func handleInstallSH(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Write(installScript)
+}
 
 type Server struct {
 	nc   *nats.Conn
@@ -140,6 +149,10 @@ func main() {
 
 	// Public endpoints (no auth required)
 	http.HandleFunc("/health", cors(handleHealth))
+	http.HandleFunc("/install.sh", cors(handleInstallSH))
+	http.HandleFunc("/docs", cors(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://tenxo.onrender.com/docs", http.StatusFound)
+	}))
 
 	// Authenticated endpoints
 	http.HandleFunc("/jobs", cors(srv.authMiddleware(srv.handleJobs)))
