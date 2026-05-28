@@ -16,15 +16,40 @@ type APIKeyInfo struct {
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
+type JobInfo struct {
+	JobID           string    `json:"job_id"`
+	Owner           string    `json:"owner,omitempty"`
+	Status          string    `json:"status"`
+	UploadURL       string    `json:"upload_url,omitempty"`
+	ResultUploadURL string    `json:"result_upload_url,omitempty"`
+	ResultURL       string    `json:"result_url,omitempty"`
+	GPUModel        string    `json:"gpu_model,omitempty"`
+	GPUVRAMMB       int       `json:"gpu_vram_mb,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type TransactionInfo struct {
+	ID          string     `json:"id"`
+	UserID      string     `json:"user_id,omitempty"`
+	JobID       string     `json:"job_id,omitempty"`
+	Type        string     `json:"type"`
+	AmountCents int64      `json:"amount_cents"`
+	GPUSeconds  int64      `json:"gpu_seconds,omitempty"`
+	Status      string     `json:"status"`
+	CreatedAt   time.Time  `json:"created_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+}
+
 type NodeInfo struct {
-	NodeID         string     `json:"node_id"`
-	Status         string     `json:"status"`
-	Owner          string     `json:"owner,omitempty"`
-	GPUModel       string     `json:"gpu_model,omitempty"`
-	GPUVRAMMB      int        `json:"gpu_vram_mb,omitempty"`
-	TEEAttested    bool       `json:"tee_attested"`
-	TEEAttestedAt  *time.Time `json:"tee_last_attested,omitempty"`
-	TTL            int64      `json:"ttl_seconds"`
+	NodeID        string     `json:"node_id"`
+	Status        string     `json:"status"`
+	Owner         string     `json:"owner,omitempty"`
+	GPUModel      string     `json:"gpu_model,omitempty"`
+	GPUVRAMMB     int        `json:"gpu_vram_mb,omitempty"`
+	TEEAttested   bool       `json:"tee_attested"`
+	TEEAttestedAt *time.Time `json:"tee_last_attested,omitempty"`
+	TTL           int64      `json:"ttl_seconds"`
 }
 
 type Store interface {
@@ -42,6 +67,7 @@ type Store interface {
 	JobGet(ctx context.Context, jobID, field string) (string, error)
 	JobGetAll(ctx context.Context, jobID string) (map[string]string, error)
 	JobExists(ctx context.Context, jobID string) (bool, error)
+	ListJobsByOwner(ctx context.Context, owner string, limit int) ([]JobInfo, error)
 
 	GetAPIKeyUser(ctx context.Context, keyHash string) (string, error)
 	SetAPIKey(ctx context.Context, keyHash, userID string) error
@@ -60,6 +86,7 @@ type Store interface {
 	BillingIncrPaid(ctx context.Context, userID string, cents int64) error
 	BillingSetLastCharge(ctx context.Context, userID string) error
 	BillingFindUserByCustomer(ctx context.Context, customerID string) (string, error)
+	BillingListTransactions(ctx context.Context, userID string, limit int) ([]TransactionInfo, error)
 
 	UsageStart(ctx context.Context, userID, jobID string) error
 	UsageStop(ctx context.Context, userID, jobID string) (elapsed int64, err error)

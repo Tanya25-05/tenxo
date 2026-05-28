@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -12,7 +13,7 @@ type MockStore struct {
 	nodes   map[string]*NodeInfo
 	jobs    map[string]map[string]string
 	apiKeys map[string]APIKeyInfo // key_hash -> info
-	users   map[string]string    // user_id -> latest key_hash
+	users   map[string]string     // user_id -> latest key_hash
 }
 
 func NewMockStore() *MockStore {
@@ -160,6 +161,37 @@ func (m *MockStore) JobExists(ctx context.Context, jobID string) (bool, error) {
 	return ok, nil
 }
 
+func (m *MockStore) ListJobsByOwner(ctx context.Context, owner string, limit int) ([]JobInfo, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	jobs := make([]JobInfo, 0)
+	now := time.Now()
+	for id, fields := range m.jobs {
+		if fields["owner"] != owner {
+			continue
+		}
+		jobs = append(jobs, JobInfo{
+			JobID:           id,
+			Owner:           fields["owner"],
+			Status:          fields["status"],
+			UploadURL:       fields["upload_url"],
+			ResultUploadURL: fields["result_upload_url"],
+			ResultURL:       fields["result_url"],
+			GPUModel:        fields["gpu_model"],
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		})
+	}
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].JobID > jobs[j].JobID })
+	if len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
+	return jobs, nil
+}
+
 func (m *MockStore) GetAPIKeyUser(ctx context.Context, keyHash string) (string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -287,6 +319,9 @@ func (m *MockStore) BillingSetLastCharge(ctx context.Context, userID string) err
 }
 func (m *MockStore) BillingFindUserByCustomer(ctx context.Context, customerID string) (string, error) {
 	return "", errors.New("not found")
+}
+func (m *MockStore) BillingListTransactions(ctx context.Context, userID string, limit int) ([]TransactionInfo, error) {
+	return []TransactionInfo{}, nil
 }
 
 type usageRecord struct {

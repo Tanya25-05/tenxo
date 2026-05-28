@@ -5,10 +5,16 @@ import (
 	_ "embed"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func parseIntField(v string) int {
+	i, _ := strconv.Atoi(v)
+	return i
+}
 
 //go:embed schema.sql
 var schemaSQL string
@@ -148,8 +154,8 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 	// Since our schema has fixed columns, we map known fields.
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO jobs (job_id, owner, status, upload_url, result_upload_url, result_url,
-		                   enc_key_b64, salt_b64, upload_path, result_path, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+		                   enc_key_b64, salt_b64, upload_path, result_path, gpu_model, gpu_vram_mb, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
 		 ON CONFLICT (job_id) DO UPDATE SET
 		   owner=COALESCE(NULLIF($2,''), jobs.owner),
 		   status=COALESCE(NULLIF($3,''), jobs.status),
@@ -160,6 +166,8 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 		   salt_b64=COALESCE(NULLIF($8,''), jobs.salt_b64),
 		   upload_path=COALESCE(NULLIF($9,''), jobs.upload_path),
 		   result_path=COALESCE(NULLIF($10,''), jobs.result_path),
+		   gpu_model=COALESCE(NULLIF($11,''), jobs.gpu_model),
+		   gpu_vram_mb=CASE WHEN $12=0 THEN jobs.gpu_vram_mb ELSE $12 END,
 		   updated_at=NOW()`,
 		jobID,
 		fields["owner"],
@@ -171,6 +179,8 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 		fields["salt_b64"],
 		fields["upload_path"],
 		fields["result_path"],
+		fields["gpu_model"],
+		parseIntField(fields["gpu_vram_mb"]),
 	)
 	return err
 }
@@ -182,6 +192,7 @@ func (s *PGStore) JobGet(ctx context.Context, jobID, field string) (string, erro
 		"result_upload_url": true, "result_url": true,
 		"enc_key_b64": true, "salt_b64": true,
 		"upload_path": true, "result_path": true,
+		"gpu_model": true, "gpu_vram_mb": true,
 	}
 	if !allowed[field] {
 		return "", fmt.Errorf("unknown job field: %s", field)
@@ -193,6 +204,35 @@ func (s *PGStore) JobGet(ctx context.Context, jobID, field string) (string, erro
 		return "", err
 	}
 	return val, nil
+}
+
+func (s *PGStore) ListJobsByOwner(ctx context.Context, owner string, limit int) ([]JobInfo, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT job_id, owner, status, upload_url, result_upload_url, result_url,
+		        gpu_model, gpu_vram_mb, created_at, updated_at
+		 FROM jobs
+		 WHERE owner=$1
+		 ORDER BY updated_at DESC
+		 LIMIT $2`,
+		owner, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	jobs := make([]JobInfo, 0)
+	for rows.Next() {
+		var j JobInfo
+		if err := rows.Scan(&j.JobID, &j.Owner, &j.Status, &j.UploadURL, &j.ResultUploadURL,
+			&j.ResultURL, &j.GPUModel, &j.GPUVRAMMB, &j.CreatedAt, &j.UpdatedAt); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
 }
 
 func (s *PGStore) JobGetAll(ctx context.Context, jobID string) (map[string]string, error) {
@@ -356,11 +396,64 @@ func (s *PGStore) BillingIncrGPU(ctx context.Context, userID string, seconds int
 }
 
 func (s *PGStore) BillingIncrPaid(ctx context.Context, userID string, cents int64) error {
-	_, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	_, err = tx.Exec(ctx,
 		`INSERT INTO usage_totals (user_id, total_paid_cents) VALUES ($1, $2)
 		 ON CONFLICT (user_id) DO UPDATE SET total_paid_cents = usage_totals.total_paid_cents + $2`,
 		userID, cents)
-	return err
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO payment_transactions (id, user_id, type, amount_cents, status, completed_at)
+		 VALUES ($1, $2, 'payment', $3, 'completed', NOW())
+		 ON CONFLICT (id) DO NOTHING`,
+		fmt.Sprintf("pay_%d_%s", time.Now().UnixNano(), userID), userID, cents)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PGStore) BillingListTransactions(ctx context.Context, userID string, limit int) ([]TransactionInfo, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, user_id, job_id, type, amount_cents, gpu_seconds, status, created_at, completed_at
+		 FROM (
+		   SELECT id, user_id, job_id, type, amount_cents, gpu_seconds, status, created_at, completed_at
+		   FROM payment_transactions
+		   WHERE user_id=$1
+		 UNION ALL
+		   SELECT 'usage_' || job_id, user_id, job_id, 'gpu_usage', 0, elapsed_seconds,
+		          CASE WHEN stopped_at IS NULL THEN 'pending' ELSE 'completed' END,
+		          COALESCE(started_at, NOW()), stopped_at
+		   FROM usage_records
+		   WHERE user_id=$1
+		 ) txs
+		 ORDER BY created_at DESC
+		 LIMIT $2`,
+		userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]TransactionInfo, 0)
+	for rows.Next() {
+		var item TransactionInfo
+		if err := rows.Scan(&item.ID, &item.UserID, &item.JobID, &item.Type, &item.AmountCents,
+			&item.GPUSeconds, &item.Status, &item.CreatedAt, &item.CompletedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *PGStore) BillingSetLastCharge(ctx context.Context, userID string) error {

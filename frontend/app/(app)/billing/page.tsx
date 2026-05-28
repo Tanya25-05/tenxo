@@ -24,20 +24,13 @@ const PAYMENT_METHODS = [
 ];
 
 interface Transaction {
-  date: string;
+  id: string;
+  created_at: string;
   type: string;
-  amount: string;
-  tx_hash: string;
+  amount_cents: number;
+  gpu_seconds?: number;
   status: "completed" | "pending" | "failed";
 }
-
-const MOCK_TRANSACTIONS: Transaction[] = [
-  { date: "2026-05-27", type: "GPU Compute", amount: "$0.34", tx_hash: "tx_7a3f...b9e2", status: "completed" },
-  { date: "2026-05-26", type: "GPU Compute", amount: "$1.02", tx_hash: "tx_9b1c...4d7a", status: "completed" },
-  { date: "2026-05-25", type: "Deposit", amount: "$10.00", tx_hash: "ch_5e4f...3c8d", status: "completed" },
-  { date: "2026-05-24", type: "GPU Compute", amount: "$0.68", tx_hash: "tx_f2a7...8b6c", status: "failed" },
-  { date: "2026-05-23", type: "GPU Compute", amount: "$0.51", tx_hash: "tx_d4e9...1f5a", status: "completed" },
-];
 
 export default function BillingPage() {
   const { toast } = useToast();
@@ -47,6 +40,7 @@ export default function BillingPage() {
   const [usageHours, setUsageHours] = useState(0);
   const [loading, setLoading] = useState(true);
   const [paymentMethods, setPaymentMethods] = useState<any[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [showAddPayment, setShowAddPayment] = useState(false);
   const [selectedMethod, setSelectedMethod] = useState<string | null>(null);
   const [processingPayment, setProcessingPayment] = useState(false);
@@ -75,11 +69,14 @@ export default function BillingPage() {
 
   const fetchBillingData = async (token: string) => {
     try {
-      const [usageRes, methodsRes] = await Promise.all([
+      const [usageRes, methodsRes, transactionsRes] = await Promise.all([
         fetch(`${API_URL}/billing/usage`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
         fetch(`${API_URL}/billing/payment-methods`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${API_URL}/billing/transactions`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
       ]);
@@ -96,6 +93,10 @@ export default function BillingPage() {
       if (methodsRes.ok) {
         const methodsData = await methodsRes.json();
         setPaymentMethods(methodsData.payment_methods || []);
+      }
+      if (transactionsRes.ok) {
+        const txData = await transactionsRes.json();
+        setTransactions(txData.transactions || []);
       }
     } catch {
       setBalance("$0.00");
@@ -354,7 +355,7 @@ export default function BillingPage() {
           <p className="text-[11px] font-semibold uppercase tracking-widest text-text-tertiary">
             Transaction History
           </p>
-          <Badge>{MOCK_TRANSACTIONS.length} entries</Badge>
+          <Badge>{transactions.length} entries</Badge>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-[13px]">
@@ -368,14 +369,22 @@ export default function BillingPage() {
               </tr>
             </thead>
             <tbody>
-              {MOCK_TRANSACTIONS.map((tx, i) => (
-                <tr key={i} className="border-b border-white/[0.04] transition-colors last:border-0 hover:bg-white/[0.02]">
-                  <td className="py-3 pr-4 text-text-secondary">{tx.date}</td>
-                  <td className="py-3 pr-4 text-text-primary">{tx.type}</td>
-                  <td className="py-3 pr-4 font-mono text-text-primary">{tx.amount}</td>
+              {transactions.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="py-8 text-center text-xs text-text-tertiary">
+                    No billing events yet.
+                  </td>
+                </tr>
+              ) : transactions.map((tx) => (
+                <tr key={tx.id} className="border-b border-white/[0.04] transition-colors last:border-0 hover:bg-white/[0.02]">
+                  <td className="py-3 pr-4 text-text-secondary">{new Date(tx.created_at).toLocaleDateString()}</td>
+                  <td className="py-3 pr-4 text-text-primary">{tx.type === "gpu_usage" ? "GPU usage" : "Payment"}</td>
+                  <td className="py-3 pr-4 font-mono text-text-primary">
+                    {tx.amount_cents > 0 ? `$${(tx.amount_cents / 100).toFixed(2)}` : `${Math.round((tx.gpu_seconds || 0) / 60)} min`}
+                  </td>
                   <td className="py-3 pr-4">
                     <span className="flex items-center gap-1 font-mono text-[12px] text-text-tertiary">
-                      {tx.tx_hash}
+                      {tx.id.substring(0, 18)}
                       <ExternalLink className="size-3 shrink-0" />
                     </span>
                   </td>

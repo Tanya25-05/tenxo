@@ -1,0 +1,316 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Length 2349 >>
+stream
+BT
+/F1 10 Tf
+14 TL
+72 760 Td
+() Tj
+T*
+(TENXO INTERNAL ARCHITECTURE) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(System Design) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Tenxo is a decentralized GPU compute marketplace with four main planes:) Tj
+T*
+() Tj
+T*
+(- Frontend: Next.js app for providers, consumers, marketplace, billing, and account workflows.) Tj
+T*
+(- Matchmaker API: Go HTTP service that owns auth, job state, node state, billing integration,) Tj
+T*
+(  storage presign, and WebSocket job updates.) Tj
+T*
+(- Orchestration bus: NATS JetStream work queue for job dispatch plus NATS subjects for node) Tj
+T*
+(  heartbeat and job result events.) Tj
+T*
+(- Workers and clients: Rust edge agent advertises GPUs and executes jobs; Python CLI/client) Tj
+T*
+(  packages and the web app submit encrypted workloads.) Tj
+T*
+() Tj
+T*
+(PostgreSQL is the source of truth for nodes, jobs, API keys, usage records, billing customers,) Tj
+T*
+(and payment transaction history. Object storage is Cloudflare R2 in production, with local) Tj
+T*
+(encrypted upload storage for development.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Services) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(- `frontend`: Next.js 14 UI. Uses Supabase auth, matchmaker REST APIs, and `/ws` for live job) Tj
+T*
+(  lifecycle updates.) Tj
+T*
+(- `backend`: Go matchmaker. Validates Supabase JWTs or Tenxo API keys, lists inventory,) Tj
+T*
+(  creates jobs, signs storage URLs, stores usage, and proxies Razorpay billing operations.) Tj
+T*
+(- `edge_agent`: Rust worker. Publishes heartbeats, reports GPU metadata and TEE status,) Tj
+T*
+(  consumes work, uploads encrypted results.) Tj
+T*
+(- `tenxo`: Python package and CLI. Packs/encrypts workloads, calls presign/job APIs, and) Tj
+T*
+(  downloads encrypted results.) Tj
+T*
+(- `nats`: JetStream broker. `jobs` stream uses work-queue retention for worker consumption;) Tj
+T*
+(  `jobs.results` reports completion.) Tj
+T*
+(- `postgres`: Persistent metadata and billing state.) Tj
+T*
+(- `r2/object storage`: Encrypted job payload and result blobs.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(APIs) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(- `GET /health`: service liveness.) Tj
+T*
+(- `GET /install.sh`: provider install script.) Tj
+T*
+(- `GET /nodes`: authenticated marketplace inventory.) Tj
+T*
+(- `GET /my-nodes`: authenticated provider-owned nodes.) Tj
+T*
+(- `GET /metrics`: authenticated dashboard metrics and GPU SKU inventory.) Tj
+T*
+ET
+endstream
+endobj
+3 0 obj
+<< /Type /Page /Parent 8 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R >> >> /Contents 2 0 R >>
+endobj
+4 0 obj
+<< /Length 2818 >>
+stream
+BT
+/F1 10 Tf
+14 TL
+72 760 Td
+(- `POST /agent/heartbeat`: authenticated provider heartbeat.) Tj
+T*
+(- `POST /presign`: authenticated encrypted upload/result URLs.) Tj
+T*
+(- `GET /jobs`: authenticated owner-scoped job list.) Tj
+T*
+(- `POST /jobs`: authenticated encrypted job submission.) Tj
+T*
+(- `GET /jobs/{id}/status`: authenticated owner-scoped job detail.) Tj
+T*
+(- `PUT|POST /storage/upload/{id}`: authenticated local dev encrypted upload.) Tj
+T*
+(- `PUT|POST /storage/result-upload/{id}`: authenticated local dev encrypted result upload.) Tj
+T*
+(- `GET /storage/result/{id}`: authenticated owner-scoped result download.) Tj
+T*
+(- `GET /ws`: WebSocket job update channel, authenticated by first message.) Tj
+T*
+(- `GET|POST /billing/*`: authenticated Razorpay customer, token, usage, charge, and) Tj
+T*
+(  transaction APIs.) Tj
+T*
+(- `POST /billing/webhook`: Razorpay webhook with HMAC signature verification.) Tj
+T*
+(- `GET|POST /api/keys`: API key listing and creation.) Tj
+T*
+(- `DELETE|PATCH /api/keys/{hash}`: API key revocation and rename.) Tj
+T*
+(- `/signal/*`: zero-knowledge key exchange signaling routes.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Node Orchestration) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(1. Provider installs and runs the edge agent with a Tenxo API key.) Tj
+T*
+(2. Agent POSTs `/agent/heartbeat` or publishes `heartbeats.{node_id}` with status, GPU model,) Tj
+T*
+(VRAM, owner, and attestation state.) Tj
+T*
+(3. Matchmaker persists node state and exposes fresh nodes with a 90-second liveness window.) Tj
+T*
+(4. Consumer uploads encrypted workload through `/presign`, then submits `/jobs`.) Tj
+T*
+(5. Matchmaker stores owner-scoped job metadata and publishes a `jobs` JetStream message.) Tj
+T*
+(6. Worker claims the job, executes it, uploads encrypted results, and publishes `jobs.results`.) Tj
+T*
+(7. Matchmaker updates job state and broadcasts the event to the consumer over `/ws`.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Payment Flow) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(1. Consumer opens billing and the frontend calls `/billing/customer`.) Tj
+T*
+(2. Backend creates or reuses a Razorpay customer bound to the authenticated user.) Tj
+T*
+(3. `/billing/setup-intent` creates a small verification order.) Tj
+T*
+(4. Razorpay Checkout returns order, payment, and signature values.) Tj
+T*
+(5. `/billing/verify-payment` validates the HMAC signature and stores the returned token.) Tj
+T*
+(6. Usage is started/stopped by trusted job lifecycle events through `/billing/track-usage`.) Tj
+T*
+(7. `/billing/charge` or auto-charge creates a Razorpay order and recurring payment with the) Tj
+T*
+(saved token.) Tj
+T*
+(8. `/billing/webhook` records captured payments and updates paid totals.) Tj
+T*
+(9. `/billing/transactions` returns usage and payment history for the dashboard.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(GPU Allocation Flow) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 8 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R >> >> /Contents 4 0 R >>
+endobj
+6 0 obj
+<< /Length 1619 >>
+stream
+BT
+/F1 10 Tf
+14 TL
+72 760 Td
+(Current allocation is queue-oriented. Available idle nodes are surfaced through `/nodes` and) Tj
+T*
+(`/metrics`; jobs enter the `jobs` JetStream work queue with optional requested GPU metadata.) Tj
+T*
+(Workers decide eligibility based on local GPU inventory and job requirements. Production scaling) Tj
+T*
+(should add explicit reservation records with node locks, requested SKU, memory floor, lease TTL,) Tj
+T*
+(and idempotent release on completion or timeout.) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Deployment Topology) Tj
+T*
+() Tj
+T*
+() Tj
+T*
+(Production topology:) Tj
+T*
+() Tj
+T*
+(- CDN or platform routing terminates TLS for the Next.js frontend.) Tj
+T*
+(- Matchmaker API runs behind HTTPS with `ALLOWED_ORIGINS` pinned to frontend origins.) Tj
+T*
+(- PostgreSQL runs in a private network with backups and restricted credentials.) Tj
+T*
+(- NATS JetStream runs with file storage, auth, persistence, and private networking.) Tj
+T*
+(- R2/S3-compatible storage holds encrypted payloads and results.) Tj
+T*
+(- Edge agents connect outbound only to HTTPS/NATS endpoints.) Tj
+T*
+(- Razorpay webhook endpoint is public but HMAC verified.) Tj
+T*
+() Tj
+T*
+(Security controls:) Tj
+T*
+() Tj
+T*
+(- Supabase JWT or hashed `txn_` API key auth on protected routes.) Tj
+T*
+(- Owner-scoped job, node, billing, and storage reads.) Tj
+T*
+(- API keys are stored as SHA-256 hashes.) Tj
+T*
+(- Webhooks and payment verification use HMAC checks.) Tj
+T*
+(- Local file storage sanitizes IDs and confines paths to the upload root.) Tj
+T*
+(- Browser CORS and WebSocket origins must be restricted in production.) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 8 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R >> >> /Contents 6 0 R >>
+endobj
+8 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>
+endobj
+9 0 obj
+<< /Type /Catalog /Pages 8 0 R >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000002486 00000 n 
+0000002612 00000 n 
+0000005482 00000 n 
+0000005608 00000 n 
+0000007279 00000 n 
+0000007405 00000 n 
+0000007474 00000 n 
+trailer << /Size 10 /Root 9 0 R >>
+startxref
+7523
+%%EOF
