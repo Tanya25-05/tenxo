@@ -225,13 +225,13 @@ export default function BillingPage() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-widest text-text-tertiary">
-                  Add funds
+                  Payment method
                 </p>
-                <p className="mt-1 text-[13px] text-text-secondary">Deposit to your Tenxo wallet</p>
+                <p className="mt-1 text-[13px] text-text-secondary">Add a card or UPI to pay for compute</p>
               </div>
-              <Button variant="secondary" size="sm">
+              <Button variant="secondary" size="sm" onClick={() => setShowAddPayment(true)}>
                 <Plus className="size-3.5" />
-                Deposit
+                Add
               </Button>
             </div>
           </Card>
@@ -244,19 +244,28 @@ export default function BillingPage() {
             <div className="mb-4 flex items-start justify-between">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-widest text-text-tertiary">
-                  Wallet Balance
+                  Outstanding Charges
                 </p>
                 <p className="mt-2 text-2xl font-semibold tracking-tight text-text-primary">
                   {loading ? "..." : balance}
+                </p>
+                <p className="mt-1 text-[11px] text-text-tertiary">
+                  Accrued compute usage at $0.15/GPU/hr
                 </p>
               </div>
               <div className="flex size-10 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
                 <Wallet className="size-4 text-text-secondary" />
               </div>
             </div>
-            <div className="flex items-center gap-2 text-[12px] text-text-tertiary">
-              <DollarSign className="size-3.5" />
-              Auto-charge at $1.00 threshold
+            <div className="mt-3 space-y-1.5 text-[12px] text-text-tertiary">
+              <div className="flex items-center gap-2">
+                <DollarSign className="size-3.5" />
+                Pre-paid credits: Coming soon
+              </div>
+              <div className="flex items-center gap-2">
+                <DollarSign className="size-3.5" />
+                Auto-charge at $1.00 threshold
+              </div>
             </div>
           </Card>
 
@@ -279,6 +288,9 @@ export default function BillingPage() {
 
             {showAddPayment ? (
               <div className="space-y-2">
+                <p className="text-[11px] text-text-tertiary mb-2">
+                  You&apos;ll be charged ₹1 (immediately refunded) to verify the card.
+                </p>
                 {PAYMENT_METHODS.map((method) => {
                   const Icon = method.icon;
                   return (

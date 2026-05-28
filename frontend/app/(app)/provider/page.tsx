@@ -15,6 +15,7 @@ import {
 import { supabase } from "@/lib/supabaseClient";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { useToast } from "@/components/ui/Toast";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
@@ -25,6 +26,7 @@ interface Node {
 }
 
 export default function ProviderDashboard() {
+  const { toast } = useToast();
   const [session, setSession] = useState<any>(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [myNodes, setMyNodes] = useState<Node[]>([]);
@@ -63,7 +65,8 @@ export default function ProviderDashboard() {
     return Math.round(total / myNodes.length);
   }, [myNodes]);
 
-  const installScript = `curl -sSL https://tenxo.com/install.sh | bash -s -- --token ${session?.access_token?.substring(0, 20)}...`;
+  const userId = session?.user?.id || "";
+  const installScript = `curl -fsSL https://tenxo-api.onrender.com/install.sh | bash -s -- --owner ${userId}`;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(installScript);
@@ -117,8 +120,23 @@ export default function ProviderDashboard() {
             </div>
           </div>
 
+          <div className="mb-4 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
+            <p className="text-[10px] font-semibold tracking-widest text-text-tertiary uppercase mb-1">
+              Your Account ID
+            </p>
+            <div className="flex items-center justify-between gap-2">
+              <code className="font-mono text-xs text-accent-purple">{userId}</code>
+              <button
+                onClick={() => { navigator.clipboard.writeText(userId); toast("User ID copied", "success"); }}
+                className="shrink-0 rounded-md px-2 py-1 text-[11px] text-text-tertiary transition-colors hover:bg-white/[0.05] hover:text-text-secondary"
+              >
+                <Copy className="size-3.5" />
+              </button>
+            </div>
+          </div>
+
           <div className="flex items-center justify-between gap-4 rounded-lg border border-white/[0.08] bg-black/40 p-4">
-            <code className="break-all font-mono text-xs text-text-tertiary">{installScript}</code>
+            <code className="break-all font-mono text-[11px] text-text-tertiary leading-relaxed">{installScript}</code>
             <button
               onClick={handleCopy}
               className="shrink-0 rounded-md px-2.5 py-1.5 text-xs text-text-tertiary transition-colors hover:bg-white/[0.05] hover:text-text-secondary"
@@ -128,11 +146,16 @@ export default function ProviderDashboard() {
             </button>
           </div>
 
+          <div className="mt-4 flex items-center gap-2 text-[11px] text-text-tertiary">
+            <span className="size-1.5 rounded-full bg-emerald-500/70" />
+            Run this on your GPU machine. Requires Docker + Rust.
+          </div>
+
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
             <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
               <ShieldCheck className="mb-2 size-4 text-text-secondary" />
-              <p className="text-sm font-medium text-text-primary">Token scoped</p>
-              <p className="mt-1 text-[11px] text-text-tertiary">Provider ownership is bound through Supabase auth.</p>
+              <p className="text-sm font-medium text-text-primary">Account-bound</p>
+              <p className="mt-1 text-[11px] text-text-tertiary">Nodes are bound to your Supabase user ID.</p>
             </div>
             <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
               <HardDrive className="mb-2 size-4 text-text-secondary" />

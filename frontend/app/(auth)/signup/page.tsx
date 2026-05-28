@@ -18,24 +18,35 @@ function GoogleIcon({ className }: { className?: string }) {
   );
 }
 
+const ROLES = [
+  { id: "developer", label: "Developer", desc: "Rent GPUs for AI workloads" },
+  { id: "provider", label: "Provider", desc: "Earn by offering idle GPU capacity" },
+  { id: "both", label: "Both", desc: "Rent GPUs and offer my own" },
+] as const;
+
 export default function SignupPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [role, setRole] = useState<string>("developer");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmSent, setConfirmSent] = useState(false);
+
+  const redirectPath = role === "both" ? "/developer" : role === "provider" ? "/provider" : "/developer";
 
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setLoading(true);
 
+    localStorage.setItem("tenxo_role", role);
+
     const { error } = await supabase.auth.signUp({
       email,
       password,
-      options: { emailRedirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || window.location.origin}/developer` },
+      options: { emailRedirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || window.location.origin}${redirectPath}` },
     });
     if (error) {
       setError(error.message);
@@ -49,9 +60,10 @@ export default function SignupPage() {
   const handleGoogleSignup = async () => {
     setError(null);
     setLoading(true);
+    localStorage.setItem("tenxo_role", role);
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || window.location.origin}/developer` },
+      options: { redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || window.location.origin}${redirectPath}` },
     });
     if (error) {
       setError(error.message);
@@ -158,6 +170,29 @@ export default function SignupPage() {
               >
                 {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
               </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-[11px] font-semibold uppercase tracking-widest text-text-tertiary">
+              I want to
+            </label>
+            <div className="space-y-1.5">
+              {ROLES.map((r) => (
+                <button
+                  key={r.id}
+                  type="button"
+                  onClick={() => setRole(r.id)}
+                  className={`w-full rounded-lg border p-3 text-left transition-colors ${
+                    role === r.id
+                      ? "border-accent-purple/50 bg-accent-purple/10"
+                      : "border-white/[0.08] bg-white/[0.02] hover:border-white/[0.15]"
+                  }`}
+                >
+                  <p className="text-[13px] font-medium text-text-primary">{r.label}</p>
+                  <p className="mt-0.5 text-[11px] text-text-tertiary">{r.desc}</p>
+                </button>
+              ))}
             </div>
           </div>
 

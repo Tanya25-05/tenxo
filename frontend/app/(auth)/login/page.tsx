@@ -26,6 +26,13 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const redirectAfterLogin = () => {
+    const savedRole = localStorage.getItem("tenxo_role");
+    if (savedRole === "provider") return "/provider";
+    if (savedRole === "both") return "/developer";
+    return "/developer";
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -37,15 +44,16 @@ export default function LoginPage() {
       setLoading(false);
       return;
     }
-    router.push("/developer");
+    router.push(redirectAfterLogin());
   };
 
   const handleGoogleLogin = async () => {
     setError(null);
     setLoading(true);
+    const path = redirectAfterLogin();
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || window.location.origin}/developer` },
+      options: { redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || window.location.origin}${path}` },
     });
     if (error) {
       setError(error.message);
