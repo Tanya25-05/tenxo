@@ -168,7 +168,7 @@ func main() {
 	http.HandleFunc("/storage/result-upload/", cors(srv.authMiddleware(srv.handleStorageResultUpload)))
 	http.HandleFunc("/storage/result/", cors(srv.authMiddleware(srv.handleStorageGet)))
 	http.HandleFunc("/ws", cors(srv.handleWS))
-	http.HandleFunc("/agent/heartbeat", cors(srv.authMiddleware(srv.handleAgentHeartbeat)))
+	http.HandleFunc("/agent/heartbeat", cors(srv.handleAgentHeartbeat))
 
 	// Zero-knowledge key exchange signaling (routes only, never inspects keys)
 	RegisterSignalingRoutes(http.DefaultServeMux)
@@ -326,12 +326,6 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, ok := r.Context().Value(userIDKey).(string)
-	if !ok || userID == "" {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	var hb HeartbeatPayload
 	if err := json.NewDecoder(r.Body).Decode(&hb); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -344,7 +338,10 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if hb.Status == "" {
 		hb.Status = "idle"
 	}
-	hb.Owner = userID
+	if hb.Owner == "" {
+		http.Error(w, "owner required", http.StatusBadRequest)
+		return
+	}
 
 	ctx := r.Context()
 	if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner, hb.GPUModel, hb.GPUVRAMMB); err != nil {
