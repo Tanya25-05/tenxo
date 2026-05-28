@@ -1,4 +1,4 @@
-import { BookOpen, CheckCircle, Cpu, KeyRound, Server, ShieldCheck, Terminal, Wallet } from "lucide-react";
+import { BookOpen, CheckCircle, Cpu, KeyRound, Lock, Server, ShieldCheck, Terminal, Wallet } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 
