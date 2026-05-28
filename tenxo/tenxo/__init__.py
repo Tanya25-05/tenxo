@@ -30,9 +30,6 @@ from .crypto import (
     decrypt_file,
     encrypt_workspace,
     verify_tee_quote,
-    generate_key,
-    key_to_b64,
-    key_from_b64,
 )
 
 from .pack import pack_workspace, check_requirements, load_ignore_patterns
@@ -54,9 +51,6 @@ __all__ = [
     "encrypt_workspace",
     "verify_encrypted_size",
     "verify_tee_quote",
-    "generate_key",
-    "key_to_b64",
-    "key_from_b64",
     "pack_workspace",
     "check_requirements",
     "load_ignore_patterns",

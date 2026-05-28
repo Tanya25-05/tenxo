@@ -386,46 +386,6 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) requireJobOwner(next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		userID, ok := r.Context().Value(userIDKey).(string)
-		if !ok || userID == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		var jobID string
-		switch {
-		case strings.HasPrefix(r.URL.Path, "/storage/upload/"):
-			jobID = strings.TrimPrefix(r.URL.Path, "/storage/upload/")
-		case strings.HasPrefix(r.URL.Path, "/storage/result-upload/"):
-			jobID = strings.TrimPrefix(r.URL.Path, "/storage/result-upload/")
-		case strings.HasPrefix(r.URL.Path, "/storage/result/"):
-			jobID = strings.TrimPrefix(r.URL.Path, "/storage/result/")
-		case strings.HasPrefix(r.URL.Path, "/jobs/"):
-			jobID = strings.TrimPrefix(r.URL.Path, "/jobs/")
-		}
-		jobID = sanitizeJobID(jobID)
-		if jobID == "" {
-			http.Error(w, "invalid job id", http.StatusBadRequest)
-			return
-		}
-
-		ctx := r.Context()
-		owner, err := s.st.JobGet(ctx, jobID, "owner")
-		if err != nil || owner == "" {
-			http.Error(w, "job not found", http.StatusNotFound)
-			return
-		}
-		if owner != userID {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-
-		next(w, r, jobID)
-	}
-}
-
 func cors(next http.HandlerFunc) http.HandlerFunc {
 	allowedOrigins := getEnv("ALLOWED_ORIGINS", "https://tenxo.onrender.com")
 	origins := strings.Split(allowedOrigins, ",")

@@ -92,9 +92,9 @@ const timeline = [
 
 export default function LandingPage() {
   return (
-    <div className="mx-auto max-w-[1100px] px-6">
+      <div className="mx-auto max-w-[1100px] px-6">
       {/* ─── 1. HERO ─── */}
-      <section className="relative py-section">
+      <section className="relative min-h-[calc(100vh-3.5rem)] py-section">
         <div className="pointer-events-none absolute inset-0 bg-hero-glow" />
         <HeroGlow>
           <div className="relative mx-auto max-w-3xl text-center">
@@ -459,7 +459,7 @@ export default function LandingPage() {
             for quick navigation
           </p>
         </div>
-      </section>
-    </div>
+        </section>
+      </div>
   );
 }
