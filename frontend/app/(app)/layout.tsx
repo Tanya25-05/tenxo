@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   Activity,
+  BookOpen,
   Container,
   CreditCard,
   Cpu,
@@ -23,6 +24,7 @@ const navItems = [
   { name: "Billing", icon: CreditCard, path: "/billing" },
   { name: "Hardware", icon: Server, path: "/provider" },
   { name: "Profile", icon: Activity, path: "/user" },
+  { name: "Docs", icon: BookOpen, path: "/docs" },
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {

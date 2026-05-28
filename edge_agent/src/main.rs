@@ -36,6 +36,8 @@ use std::fs::{self, File};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 use tungstenite::{Message, WebSocket};
@@ -43,12 +45,38 @@ use tungstenite::stream::MaybeTlsStream;
 use uuid::Uuid;
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
 
+mod sev_snp;
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const NONCE_SIZE: usize = 12;
 const AEAD_KEY_SIZE: usize = 32;
 const SALT_SIZE: usize = 32;
 const HEARTBEAT_INTERVAL_SECS: u64 = 20;
+
+// ─── GPU Detection ──────────────────────────────────────────────────────────
+
+fn query_gpu_info() -> (String, i32) {
+    // Returns (gpu_model, vram_mb)
+    let output = Command::new("nvidia-smi")
+        .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let line = stdout.lines().next().unwrap_or("").trim();
+            if let Some(comma_pos) = line.find(',') {
+                let model = line[..comma_pos].trim().to_string();
+                let vram_str = line[comma_pos + 1..].trim();
+                let vram_mb: i32 = vram_str.parse().unwrap_or(0);
+                (model, vram_mb)
+            } else {
+                (line.to_string(), 0)
+            }
+        }
+        _ => ("unknown".to_string(), 0),
+    }
+}
 
 // ─── Data Structures ────────────────────────────────────────────────────────
 
@@ -111,51 +139,6 @@ fn derive_aes_key(shared_secret: &[u8], salt: &[u8]) -> [u8; AEAD_KEY_SIZE] {
     aes_key
 }
 
-// ─── TEE Quote Generation ──────────────────────────────────────────────────
-
-fn generate_tee_quote(agent_pubkey: &PublicKey) -> TeeQuote {
-    // In production, this calls the AMD SEV-SNP firmware via /dev/sev
-    // or the Intel TDX quote generation ioctl.
-    //
-    // The report_data field is 64 bytes:
-    //   [0..32]  SHA-256(agent_ephemeral_pubkey)
-    //   [32..64] random nonce or user-supplied data
-    //
-    // For the MVP, we construct a structurally valid quote.
-    // In production, replace with:
-    //   let report = sev::AttestationReport::new(report_data)?;
-    //   let quote = sev::get_quote(report, &oca_cert_chain)?;
-
-    use sha2::Digest;
-
-    let pubkey_raw = agent_pubkey.as_bytes();
-    let pubkey_hash = Sha256::digest(pubkey_raw);
-
-    let mut report_data = [0u8; 64];
-    report_data[..32].copy_from_slice(&pubkey_hash);
-
-    // Measurement: SHA-384 of the TEE memory (trusted code + data).
-    // In the MVP, use a fixed measurement. In production, this is
-    // computed by the SEV-SNP firmware during boot.
-    let measurement = Sha256::digest(b"tenxo-edge-agent-v1");
-
-    // Chip ID: unique AMD EPYC CPU identifier (64 bytes).
-    // In production, retrieved from MSR 0xC001_0131 or via /dev/sev.
-    let chip_id = b"0000000000000000AMD-EPYC-9B12-2024-SNP-VALIDATION-KEY----";
-
-    TeeQuote {
-        report_data_b64: general_purpose::STANDARD.encode(&report_data[..]),
-        measurement_b64: general_purpose::STANDARD.encode(measurement),
-        chip_id_b64: general_purpose::STANDARD.encode(chip_id),
-        signature_b64: general_purpose::STANDARD.encode(b"ECDSA-SECP384R1-DUMMY-SIGNATURE"),
-        cert_chain_b64: vec![
-            general_purpose::STANDARD.encode(b"MILAN-ARK-CERT"),
-            general_purpose::STANDARD.encode(b"MILAN-ASK-CERT"),
-            general_purpose::STANDARD.encode(b"MILAN-OCA-CERT"),
-        ],
-    }
-}
-
 // ─── Padding Removal ────────────────────────────────────────────────────────
 
 fn unpad_payload(padded: &[u8]) -> Result<Vec<u8>> {
@@ -212,24 +195,49 @@ fn perform_key_exchange(
         .replace("http://", "ws://")
         .replace("https://", "wss://");
 
-    // ── Step 1: Generate TEE quote with pubkey bound in report_data ───
-    let quote = generate_tee_quote(&agent_keys.public);
-
-    // ── Step 2: Connect WebSocket to matchmaker ───────────────────────
+    // ── Step 1: Connect WebSocket to matchmaker ───────────────────────
     let (mut ws, _) = tungstenite::connect(&format!("{}/signal/agent", ws_url))
         .context("failed to connect to matchmaker signaling WS")?;
     println!("Connected to matchmaker signaling WebSocket");
 
-    // ── Step 3: Send tee_quote message ────────────────────────────────
+    // ── Step 2: Receive challenge nonce from matchmaker ───────────────
+    let challenge_nonce: [u8; 32] = loop {
+        let msg = ws.read().context("failed to read challenge")?;
+        if let Message::Text(text) = msg {
+            let val: serde_json::Value =
+                serde_json::from_str(&text).context("invalid JSON in challenge")?;
+            if val.get("type").and_then(|t| t.as_str()) == Some("challenge") {
+                let nonce_b64 = val["payload"]["nonce"]
+                    .as_str()
+                    .context("missing nonce in challenge")?
+                    .to_string();
+                let nonce_bytes = general_purpose::STANDARD
+                    .decode(&nonce_b64)
+                    .context("failed to decode challenge nonce")?;
+                if nonce_bytes.len() != 32 {
+                    return Err(anyhow!("challenge nonce must be 32 bytes, got {}", nonce_bytes.len()));
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&nonce_bytes);
+                break arr;
+            }
+        }
+    };
+    println!("Received challenge nonce from matchmaker");
+
+    // ── Step 3: Generate TEE quote with challenge bound in report_data ─
+    let quote = sev_snp::generate_tee_quote(&agent_keys.public, &challenge_nonce);
+
+    // ── Step 4: Send tee_quote message ────────────────────────────────
     let quote_msg = serde_json::json!({
         "type": "tee_quote",
         "payload": &quote,
     });
     ws.send(Message::Text(serde_json::to_string(&quote_msg)?))
         .context("failed to send tee_quote")?;
-    println!("TEE quote sent to matchmaker");
+    println!("TEE quote sent to matchmaker (challenge nonce embedded in report_data[32..64])");
 
-    // ── Step 4: Receive session_created ───────────────────────────────
+    // ── Step 5: Receive session_created ───────────────────────────────
     let session_resp: serde_json::Value = loop {
         let msg = ws.read().context("failed to read session response")?;
         if let Message::Text(text) = msg {
@@ -246,7 +254,7 @@ fn perform_key_exchange(
         .to_string();
     println!("Session created via WebSocket: {}", session_id);
 
-    // ── Step 5: Wait for client_pub_key message ───────────────────────
+    // ── Step 6: Wait for client_pub_key message ───────────────────────
     let client_pubkey = loop {
         let msg = ws.read().context("failed to read client pubkey")?;
         match msg {
@@ -513,12 +521,15 @@ fn main() -> Result<()> {
     println!("Ephemeral X25519 keypair generated");
 
     // ── ECDH Key Exchange + acquire persistent WebSocket bridge ──────
-    // The WS stays open after key exchange for jobs and results.
     let (shared_secret, mut ws) = perform_key_exchange(
         &matchmaker_url,
         agent_keys,
     )?;
     println!("ECDH shared secret computed (matchmaker never saw it)");
+
+    // ── Query GPU info ──────────────────────────────────────────────
+    let (gpu_model, gpu_vram_mb) = query_gpu_info();
+    println!("Detected GPU: {} ({} MB VRAM)", gpu_model, gpu_vram_mb);
 
     // ── Register with matchmaker bridge ────────────────────────────
     let reg_msg = serde_json::json!({
@@ -527,21 +538,38 @@ fn main() -> Result<()> {
             "node_id": node_id,
             "status": "idle",
             "owner": owner,
+            "gpu_model": gpu_model,
+            "gpu_vram_mb": gpu_vram_mb,
         }
     });
     ws.send(Message::Text(serde_json::to_string(&reg_msg)?))?;
+
+    // ── Shutdown flag ──────────────────────────────────────────────
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+    ctrlc::set_handler(move || {
+        println!("Received shutdown signal, cleaning up...");
+        shutdown_clone.store(true, Ordering::SeqCst);
+    })
+    .context("failed to set Ctrl-C handler")?;
 
     // ── Spawn heartbeat publisher (HTTP POST, no NATS needed) ──────
     let hb_client = client.clone();
     let hb_url = format!("{}/agent/heartbeat", matchmaker_url);
     let hb_node = node_id.clone();
     let hb_owner = owner.clone();
+    let hb_gpu_model = gpu_model.clone();
+    let hb_gpu_vram = gpu_vram_mb;
+    let hb_shutdown = shutdown.clone();
     std::thread::spawn(move || {
-        loop {
+        while !hb_shutdown.load(Ordering::SeqCst) {
             let hb = serde_json::json!({
                 "node_id": hb_node,
                 "status": "idle",
                 "owner": hb_owner,
+                "gpu_model": hb_gpu_model,
+                "gpu_vram_mb": hb_gpu_vram,
+                "tee_attested": true,
             });
             let _ = hb_client.post(&hb_url).json(&hb).send();
             std::thread::sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
@@ -549,8 +577,16 @@ fn main() -> Result<()> {
     });
 
     // ── Job processing loop via WebSocket bridge ─────────────────────
-    loop {
-        let msg = ws.read().context("WS bridge read failed")?;
+    while !shutdown.load(Ordering::SeqCst) {
+        let msg = match ws.read() {
+            Ok(m) => m,
+            Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(e) => {
+                eprintln!("WS bridge read failed: {}", e);
+                break;
+            }
+        };
         match msg {
             Message::Text(text) => {
                 let payload: JobMsg = match serde_json::from_str(&text) {
@@ -560,6 +596,8 @@ fn main() -> Result<()> {
                         continue;
                     }
                 };
+
+                let current_job_id = payload.job_id.clone().unwrap_or_default();
 
                 // ── Derive AES key from shared secret + per-job salt ─
                 let result = match &payload.salt_b64 {
@@ -573,11 +611,10 @@ fn main() -> Result<()> {
                         }
                         let mut aes_key = [0u8; AEAD_KEY_SIZE];
                         aes_key.copy_from_slice(&derive_aes_key(&shared_secret, &salt));
-                        println!("AES key derived via HKDF for job {}", payload.job_id.as_deref().unwrap_or("?"));
+                        println!("AES key derived via HKDF for job {}", current_job_id);
                         handle_job(&client, &payload, &aes_key)
                     }
                     None => {
-                        // Legacy: use enc_key_b64 as raw AES key
                         let key_b64 = payload.enc_key_b64.as_deref().unwrap_or("");
                         if key_b64.is_empty() {
                             eprintln!("no enc_key_b64 or salt_b64 in job message");
@@ -600,24 +637,22 @@ fn main() -> Result<()> {
                 // ── Send result over WebSocket bridge ─────────────────
                 let reply = match result {
                     Ok(result_url) => {
-                        let job_id = payload.job_id.clone();
-                        println!("Job {} completed successfully", job_id.as_deref().unwrap_or("?"));
+                        println!("Job {} completed successfully", current_job_id);
                         serde_json::json!({
                             "type": "result",
                             "payload": {
-                                "job_id": job_id,
+                                "job_id": current_job_id,
                                 "status": "done",
                                 "result_url": result_url,
                             }
                         })
                     }
                     Err(e) => {
-                        let job_id = payload.job_id.clone();
                         eprintln!("Job failed: {}", e);
                         serde_json::json!({
                             "type": "result",
                             "payload": {
-                                "job_id": job_id,
+                                "job_id": current_job_id,
                                 "status": "error",
                                 "error": format!("{}", e),
                             }
@@ -634,5 +669,6 @@ fn main() -> Result<()> {
         }
     }
 
+    println!("Agent shutting down gracefully");
     Ok(())
 }

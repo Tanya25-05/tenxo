@@ -35,6 +35,8 @@
 package signaling
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -61,14 +63,21 @@ type TeeQuote struct {
 
 // Session represents one ECDH key exchange session.
 type Session struct {
-	ID           string          `json:"id"`
-	AgentPubKey  string          `json:"agent_pub_key,omitempty"`
-	ClientPubKey string          `json:"client_pub_key,omitempty"`
-	AgentQuote   *TeeQuote       `json:"agent_quote,omitempty"`
-	AgentConn    *websocket.Conn `json:"-"`
-	ClientConn   *websocket.Conn `json:"-"`
-	CreatedAt    time.Time       `json:"created_at"`
-	done         chan struct{}
+	ID              string          `json:"id"`
+	ChallengeNonce  string          `json:"challenge_nonce,omitempty"`
+	AgentPubKey     string          `json:"agent_pub_key,omitempty"`
+	ClientPubKey    string          `json:"client_pub_key,omitempty"`
+	AgentQuote      *TeeQuote       `json:"agent_quote,omitempty"`
+	AgentConn       *websocket.Conn `json:"-"`
+	ClientConn      *websocket.Conn `json:"-"`
+	CreatedAt       time.Time       `json:"created_at"`
+	done            chan struct{}
+}
+
+func generateChallenge() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 // WSMessage is the generic WebSocket frame.
@@ -147,10 +156,12 @@ func (ss *SessionStore) DeleteSession(id string) {
 // HandleAgentWS handles WebSocket connections from GPU agents.
 //
 // Flow:
-//  1. Agent connects and sends TeeQuote + its ephemeral X25519 pubkey
-//  2. Matchmaker creates a session, stores the quote, returns session ID
-//  3. Agent reads ClientPubKey from the same WebSocket (pushed by HandleClientWS)
-//  4. Once ClientPubKey arrives, agent can compute ECDH shared secret
+//  1. Matchmaker sends a challenge nonce to the agent
+//  2. Agent responds with TeeQuote containing challenge in report_data[32..64]
+//  3. Matchmaker verifies the challenge nonce is embedded in the quote
+//  4. Matchmaker creates a session, stores the quote, returns session ID
+//  5. Agent reads ClientPubKey from the same WebSocket (pushed by HandleClientWS)
+//  6. Once ClientPubKey arrives, agent can compute ECDH shared secret
 func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := ss.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -159,7 +170,21 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// ── Step 1: Agent sends TeeQuote ──────────────────────────────────
+	// ── Step 1: Issue challenge nonce to agent ────────────────────────
+	challenge := generateChallenge()
+	challengeMsg, _ := json.Marshal(WSMessage{
+		Type: "challenge",
+		Payload: mustMarshal(map[string]string{
+			"nonce": challenge,
+		}),
+	})
+	if err := conn.WriteMessage(websocket.TextMessage, challengeMsg); err != nil {
+		log.Printf("signaling: agent send challenge failed: %v", err)
+		return
+	}
+	log.Printf("signaling: challenge sent to agent (nonce: %.16s...)", challenge)
+
+	// ── Step 2: Agent sends TeeQuote ──────────────────────────────────
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
 		log.Printf("signaling: agent read quote failed: %v", err)
@@ -183,11 +208,36 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Step 2: Create session and store quote ────────────────────────
+	// ── Step 3: Verify challenge is embedded in report_data[32..64] ───
+	reportData, err := base64.StdEncoding.DecodeString(quote.ReportDataB64)
+	if err != nil || len(reportData) != 64 {
+		log.Printf("signaling: invalid report_data in quote: len=%d err=%v", len(reportData), err)
+		return
+	}
+
+	challengeBytes, err := base64.StdEncoding.DecodeString(challenge)
+	if err != nil || len(challengeBytes) != 32 {
+		log.Printf("signaling: invalid challenge encoding: err=%v", err)
+		return
+	}
+
+	// report_data[32..64] must match the issued challenge
+	embeddedChallenge := reportData[32:64]
+	for i, b := range embeddedChallenge {
+		if b != challengeBytes[i] {
+			log.Printf("signaling: challenge mismatch in report_data[32..64] — possible replay attack")
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"error":"challenge mismatch — attestation rejected"}}`))
+			return
+		}
+	}
+	log.Printf("signaling: challenge verified in TEE quote (report_data[32..64] matches issued nonce)")
+
+	// ── Step 4: Create session and store quote ────────────────────────
 	sessionID := ss.CreateSession()
 	session, _ := ss.GetSession(sessionID)
 	session.AgentConn = conn
 	session.AgentQuote = &quote
+	session.ChallengeNonce = challenge
 
 	log.Printf("signaling: agent session created: %s", sessionID)
 
@@ -204,7 +254,7 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Step 3: Read ClientPubKey (pushed by HandleClientWS) ─────────
+	// ── Step 5: Read ClientPubKey (pushed by HandleClientWS) ─────────
 	// The client connects via HandleClientWS, receives the TeeQuote,
 	// verifies it, and sends back its ephemeral pubkey. HandleClientWS
 	// pushes that pubkey to this open WebSocket.
@@ -232,7 +282,7 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 	log.Printf("signaling: agent received client pubkey for session %s", sessionID)
 	ss.DeleteSession(sessionID)
 
-	// ── Persistent bridge mode: WS ↔ NATS ────────────────────────────
+	// ── Step 6: Persistent bridge mode: WS ↔ NATS ────────────────────
 	// After key exchange, the WebSocket stays open and acts as a NATS
 	// proxy for this agent. This avoids exposing the NATS port to the
 	// internet — agents communicate entirely through port 8080.

@@ -39,12 +39,23 @@ func (s *PGStore) Close() {
 	s.pool.Close()
 }
 
-func (s *PGStore) SetNode(ctx context.Context, nodeID, status, owner string) error {
+func (s *PGStore) SetNode(ctx context.Context, nodeID, status, owner, gpuModel string, gpuVRAMMB int) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO nodes (node_id, status, owner, last_seen)
-		 VALUES ($1, $2, $3, NOW())
-		 ON CONFLICT (node_id) DO UPDATE SET status=$2, owner=$3, last_seen=NOW()`,
-		nodeID, status, owner)
+		`INSERT INTO nodes (node_id, status, owner, gpu_model, gpu_vram_mb, last_seen)
+		 VALUES ($1, $2, $3, $4, $5, NOW())
+		 ON CONFLICT (node_id) DO UPDATE SET
+		   status=$2, owner=$3,
+		   gpu_model=CASE WHEN $4='' THEN nodes.gpu_model ELSE $4 END,
+		   gpu_vram_mb=CASE WHEN $5=0 THEN nodes.gpu_vram_mb ELSE $5 END,
+		   last_seen=NOW()`,
+		nodeID, status, owner, gpuModel, gpuVRAMMB)
+	return err
+}
+
+func (s *PGStore) SetNodeTEE(ctx context.Context, nodeID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE nodes SET tee_attested=TRUE, tee_last_attested=NOW() WHERE node_id=$1`,
+		nodeID)
 	return err
 }
 
@@ -71,7 +82,8 @@ func (s *PGStore) GetNodeOwner(ctx context.Context, nodeID string) (string, erro
 
 func (s *PGStore) GetAllNodes(ctx context.Context) (map[string]*NodeInfo, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT node_id, status, owner,
+		`SELECT node_id, status, owner, gpu_model, gpu_vram_mb,
+		        tee_attested, tee_last_attested,
 		        EXTRACT(EPOCH FROM (last_seen + INTERVAL '60 seconds' - NOW()))::bigint AS ttl
 		 FROM nodes
 		 WHERE last_seen > NOW() - INTERVAL '90 seconds'`)
@@ -83,7 +95,8 @@ func (s *PGStore) GetAllNodes(ctx context.Context) (map[string]*NodeInfo, error)
 	nodes := make(map[string]*NodeInfo)
 	for rows.Next() {
 		n := &NodeInfo{}
-		if err := rows.Scan(&n.NodeID, &n.Status, &n.Owner, &n.TTL); err != nil {
+		if err := rows.Scan(&n.NodeID, &n.Status, &n.Owner, &n.GPUModel, &n.GPUVRAMMB,
+			&n.TEEAttested, &n.TEEAttestedAt, &n.TTL); err != nil {
 			return nil, err
 		}
 		if n.TTL < 0 {
@@ -96,7 +109,8 @@ func (s *PGStore) GetAllNodes(ctx context.Context) (map[string]*NodeInfo, error)
 
 func (s *PGStore) GetNodesByOwner(ctx context.Context, owner string) (map[string]*NodeInfo, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT node_id, status, owner,
+		`SELECT node_id, status, owner, gpu_model, gpu_vram_mb,
+		        tee_attested, tee_last_attested,
 		        EXTRACT(EPOCH FROM (last_seen + INTERVAL '60 seconds' - NOW()))::bigint AS ttl
 		 FROM nodes
 		 WHERE owner=$1 AND last_seen > NOW() - INTERVAL '90 seconds'`,
@@ -109,7 +123,8 @@ func (s *PGStore) GetNodesByOwner(ctx context.Context, owner string) (map[string
 	nodes := make(map[string]*NodeInfo)
 	for rows.Next() {
 		n := &NodeInfo{}
-		if err := rows.Scan(&n.NodeID, &n.Status, &n.Owner, &n.TTL); err != nil {
+		if err := rows.Scan(&n.NodeID, &n.Status, &n.Owner, &n.GPUModel, &n.GPUVRAMMB,
+			&n.TEEAttested, &n.TEEAttestedAt, &n.TTL); err != nil {
 			return nil, err
 		}
 		if n.TTL < 0 {
@@ -215,15 +230,81 @@ func (s *PGStore) JobExists(ctx context.Context, jobID string) (bool, error) {
 func (s *PGStore) GetAPIKeyUser(ctx context.Context, keyHash string) (string, error) {
 	var userID string
 	err := s.pool.QueryRow(ctx,
-		`SELECT user_id FROM api_keys WHERE key_hash=$1`, keyHash).Scan(&userID)
+		`SELECT user_id FROM api_keys
+		 WHERE key_hash=$1 AND is_active=TRUE
+		   AND (expires_at IS NULL OR expires_at > NOW())`, keyHash).Scan(&userID)
 	return userID, err
 }
 
 func (s *PGStore) SetAPIKey(ctx context.Context, keyHash, userID string) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO api_keys (key_hash, user_id) VALUES ($1, $2)
-		 ON CONFLICT (key_hash) DO UPDATE SET user_id=$2`,
+		 ON CONFLICT (key_hash) DO UPDATE SET user_id=$2, last_used_at=NOW()`,
 		keyHash, userID)
+	return err
+}
+
+func (s *PGStore) CreateAPIKey(ctx context.Context, keyHash, userID, name, role string, expiresAt *time.Time) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO api_keys (key_hash, user_id, name, role, expires_at)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		keyHash, userID, name, role, expiresAt)
+	return err
+}
+
+func (s *PGStore) ListAPIKeys(ctx context.Context, userID string) ([]APIKeyInfo, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT key_hash, user_id, name, role, is_active, expires_at, created_at, last_used_at
+		 FROM api_keys WHERE user_id=$1
+		 ORDER BY created_at DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []APIKeyInfo
+	for rows.Next() {
+		var k APIKeyInfo
+		if err := rows.Scan(&k.KeyHash, &k.UserID, &k.Name, &k.Role,
+			&k.IsActive, &k.ExpiresAt, &k.CreatedAt, &k.LastUsedAt); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+func (s *PGStore) RevokeAPIKey(ctx context.Context, keyHash, userID string) error {
+	res, err := s.pool.Exec(ctx,
+		`UPDATE api_keys SET is_active=FALSE WHERE key_hash=$1 AND user_id=$2`,
+		keyHash, userID)
+	if err != nil {
+		return err
+	}
+	if res.RowsAffected() == 0 {
+		return fmt.Errorf("api key not found or not owned by user")
+	}
+	return nil
+}
+
+func (s *PGStore) UpdateAPIKeyName(ctx context.Context, keyHash, userID, name string) error {
+	res, err := s.pool.Exec(ctx,
+		`UPDATE api_keys SET name=$3 WHERE key_hash=$1 AND user_id=$2`,
+		keyHash, userID, name)
+	if err != nil {
+		return err
+	}
+	if res.RowsAffected() == 0 {
+		return fmt.Errorf("api key not found or not owned by user")
+	}
+	return nil
+}
+
+func (s *PGStore) TouchAPIKey(ctx context.Context, keyHash string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE api_keys SET last_used_at=NOW() WHERE key_hash=$1`,
+		keyHash)
 	return err
 }
 
@@ -315,4 +396,34 @@ func (s *PGStore) UsageStop(ctx context.Context, userID, jobID string) (elapsed 
 		log.Printf("UsageStop: %s/%s: %v", userID, jobID, err)
 	}
 	return
+}
+
+func (s *PGStore) ReapStaleJobs(ctx context.Context, maxAge time.Duration) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`UPDATE jobs
+		 SET status = 'failed', updated_at = NOW()
+		 WHERE status IN ('queued', 'created', 'running')
+		   AND updated_at < NOW() - $1::interval
+		 RETURNING job_id, owner`,
+		maxAge.String())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reaped []string
+	for rows.Next() {
+		var jobID, owner string
+		if err := rows.Scan(&jobID, &owner); err != nil {
+			return reaped, err
+		}
+		// Close usage tracking so provider gets paid for partial work
+		if owner != "" {
+			if _, err := s.UsageStop(ctx, owner, jobID); err != nil {
+				log.Printf("reaper: UsageStop %s/%s: %v", owner, jobID, err)
+			}
+		}
+		reaped = append(reaped, jobID)
+	}
+	return reaped, rows.Err()
 }

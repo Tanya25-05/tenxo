@@ -52,15 +52,22 @@ type JobRequest struct {
 }
 
 type HeartbeatPayload struct {
-	NodeID string `json:"node_id"`
-	Status string `json:"status"`
-	Owner  string `json:"owner"`
+	NodeID         string `json:"node_id"`
+	Status         string `json:"status"`
+	Owner          string `json:"owner"`
+	GPUModel       string `json:"gpu_model"`
+	GPUVRAMMB      int    `json:"gpu_vram_mb"`
+	TEEAttested    bool   `json:"tee_attested"`
 }
 
 type NodeInfo struct {
-	NodeID string `json:"node_id"`
-	Status string `json:"status"`
-	TTL    int64  `json:"ttl_seconds"`
+	NodeID        string     `json:"node_id"`
+	Status        string     `json:"status"`
+	GPUModel      string     `json:"gpu_model,omitempty"`
+	GPUVRAMMB     int        `json:"gpu_vram_mb,omitempty"`
+	TEEAttested   bool       `json:"tee_attested"`
+	TEEAttestedAt *time.Time `json:"tee_last_attested,omitempty"`
+	TTL           int64      `json:"ttl_seconds"`
 }
 
 type PresignRequest struct {
@@ -129,6 +136,7 @@ func main() {
 	srv := &Server{nc: nc, js: js, st: st, jwks: jwks, wsClients: make(map[string]map[*websocket.Conn]bool)}
 	go srv.listenHeartbeats(context.Background())
 	go srv.subscribeResults()
+	go srv.reapStaleJobs(context.Background())
 
 	// Public endpoints (no auth required)
 	http.HandleFunc("/health", cors(handleHealth))
@@ -148,6 +156,10 @@ func main() {
 	// Zero-knowledge key exchange signaling (routes only, never inspects keys)
 	RegisterSignalingRoutes(http.DefaultServeMux)
 	signalStore.SetNATS(nc)
+
+	// API Key management
+	http.HandleFunc("/api/keys", cors(srv.authMiddleware(srv.handleAPIKeys)))
+	http.HandleFunc("/api/keys/", cors(srv.authMiddleware(srv.handleAPIKeyByHash)))
 
 	// Billing / Razorpay — Vast.ai/RunPod model (pay-as-you-go, card + UPI)
 	paymentHandler := payment.NewBillingHandler(st)
@@ -183,6 +195,104 @@ func main() {
 	}
 }
 
+func generateAPIKey() (rawKey, keyHash string, err error) {
+	keyBytes := make([]byte, 32)
+	if _, err := rand.Read(keyBytes); err != nil {
+		return "", "", err
+	}
+	rawKey = "txn_" + base64.RawURLEncoding.EncodeToString(keyBytes)
+	h := sha256.Sum256([]byte(rawKey))
+	keyHash = hex.EncodeToString(h[:])
+	return rawKey, keyHash, nil
+}
+
+// handleAPIKeys handles POST (create) and GET (list) for API keys
+func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		keys, err := s.st.ListAPIKeys(r.Context(), userID)
+		if err != nil {
+			log.Printf("ListAPIKeys: %v", err)
+			http.Error(w, "failed to list keys", http.StatusInternalServerError)
+			return
+		}
+		var newRawKey string
+		if len(keys) == 0 {
+			rawKey, keyHash, genErr := generateAPIKey()
+			if genErr == nil {
+				if createErr := s.st.CreateAPIKey(r.Context(), keyHash, userID, "auto-generated", "developer", nil); createErr == nil {
+					keys = []store.APIKeyInfo{{KeyHash: keyHash, Name: "auto-generated", Role: "developer", IsActive: true}}
+					newRawKey = rawKey
+					w.Header().Set("X-New-API-Key", rawKey)
+				}
+			}
+		}
+		resp := map[string]any{"keys": keys}
+		if newRawKey != "" {
+			resp["_new_key"] = newRawKey
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleAPIKeyByHash handles DELETE (revoke) and PATCH (rename) for a specific key
+func (s *Server) handleAPIKeyByHash(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	keyHash := strings.TrimPrefix(r.URL.Path, "/api/keys/")
+	keyHash = sanitizeJobID(keyHash)
+	if keyHash == "" || len(keyHash) != 64 {
+		http.Error(w, "invalid key hash", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodDelete:
+		if err := s.st.RevokeAPIKey(r.Context(), keyHash, userID); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "revoked"})
+
+	case http.MethodPatch:
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if req.Name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if err := s.st.UpdateAPIKeyName(r.Context(), keyHash, userID, req.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -212,10 +322,13 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner); err != nil {
+	if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner, hb.GPUModel, hb.GPUVRAMMB); err != nil {
 		log.Printf("heartbeat: failed to set node state for %s: %v", hb.NodeID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	if hb.TEEAttested {
+		_ = s.st.SetNodeTEE(ctx, hb.NodeID)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -260,12 +373,15 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "missing auth token", http.StatusUnauthorized)
 			return
 		}
-		userID, err := s.validateAuth(token)
+		userID, newKey, err := s.validateAuth(token)
 		if err != nil {
 			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
 		ctx := context.WithValue(r.Context(), userIDKey, userID)
+		if newKey != "" {
+			w.Header().Set("X-New-API-Key", newKey)
+		}
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -544,9 +660,13 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	nodes := make([]NodeInfo, 0, len(nodeMap))
 	for _, n := range nodeMap {
 		nodes = append(nodes, NodeInfo{
-			NodeID: n.NodeID,
-			Status: n.Status,
-			TTL:    n.TTL,
+			NodeID:        n.NodeID,
+			Status:        n.Status,
+			GPUModel:      n.GPUModel,
+			GPUVRAMMB:     n.GPUVRAMMB,
+			TEEAttested:   n.TEEAttested,
+			TEEAttestedAt: n.TEEAttestedAt,
+			TTL:           n.TTL,
 		})
 	}
 
@@ -576,9 +696,13 @@ func (s *Server) handleMyNodes(w http.ResponseWriter, r *http.Request) {
 	nodes := make([]NodeInfo, 0, len(nodeMap))
 	for _, n := range nodeMap {
 		nodes = append(nodes, NodeInfo{
-			NodeID: n.NodeID,
-			Status: n.Status,
-			TTL:    n.TTL,
+			NodeID:        n.NodeID,
+			Status:        n.Status,
+			GPUModel:      n.GPUModel,
+			GPUVRAMMB:     n.GPUVRAMMB,
+			TEEAttested:   n.TEEAttested,
+			TEEAttestedAt: n.TEEAttestedAt,
+			TTL:           n.TTL,
 		})
 	}
 
@@ -594,21 +718,23 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 // ─── Signaling Routes (Zero-Knowledge ECDH Key Exchange) ───────────────────
 
 var signalStore *signaling.SessionStore
+var signalRateLimiter *RateLimiter
 
 func initSignaling() {
 	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxo.onrender.com")
 	signalStore = signaling.NewSessionStore(allowedOrigin)
+	// 30 session creation requests per minute per IP
+	signalRateLimiter = NewRateLimiter(30, time.Minute)
 }
 
 func RegisterSignalingRoutes(mux *http.ServeMux) {
 	initSignaling()
 
-	// WebSocket endpoints for real-time key exchange
-	mux.HandleFunc("/signal/agent", cors(signalStore.HandleAgentWS))
+	// Rate-limited signaling endpoints
+	mux.HandleFunc("/signal/agent", cors(RateLimit(signalRateLimiter, signalStore.HandleAgentWS)))
 	mux.HandleFunc("/signal/client", cors(signalStore.HandleClientWS))
 
-	// REST endpoints for CLI-based polling flow
-	mux.HandleFunc("/signal/session", cors(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/signal/session", cors(RateLimit(signalRateLimiter, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
 			signalStore.HandleCreateSession(w, r)
@@ -617,10 +743,10 @@ func RegisterSignalingRoutes(mux *http.ServeMux) {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-	}))
-	mux.HandleFunc("/signal/client-key", cors(signalStore.HandlePostClientKey))
+	})))
+	mux.HandleFunc("/signal/client-key", cors(RateLimit(signalRateLimiter, signalStore.HandlePostClientKey)))
 
-	log.Println("signaling: zero-knowledge ECDH routes registered")
+	log.Println("signaling: zero-knowledge ECDH routes registered (rate-limited: 30 req/min)")
 }
 
 func (s *Server) listenHeartbeats(ctx context.Context) {
@@ -641,9 +767,12 @@ func (s *Server) listenHeartbeats(ctx context.Context) {
 			hb.Status = "idle"
 		}
 
-		if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner); err != nil {
+		if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner, hb.GPUModel, hb.GPUVRAMMB); err != nil {
 			log.Printf("failed to update node state for %s: %v", hb.NodeID, err)
 			return
+		}
+		if hb.TEEAttested {
+			_ = s.st.SetNodeTEE(ctx, hb.NodeID)
 		}
 
 		log.Printf("node %s updated to %s", hb.NodeID, hb.Status)
@@ -654,31 +783,46 @@ func (s *Server) listenHeartbeats(ctx context.Context) {
 	log.Printf("subscribed to heartbeats.> and tracking node state in PostgreSQL")
 }
 
-func (s *Server) validateAuth(token string) (string, error) {
+func (s *Server) validateAuth(token string) (userID, newAPIKey string, err error) {
 	if token == "" {
-		return "", errors.New("empty token")
+		return "", "", errors.New("empty token")
 	}
 
+	// Try API key first (txn_ prefixed keys)
 	h := sha256.Sum256([]byte(token))
 	hexk := hex.EncodeToString(h[:])
 	ctx := context.Background()
 	if uid, err := s.st.GetAPIKeyUser(ctx, hexk); err == nil {
-		return uid, nil
+		_ = s.st.TouchAPIKey(ctx, hexk)
+		return uid, "", nil
 	}
 
+	// Try JWT (Supabase auth)
 	if s.jwks != nil {
 		t, err := s.parseAndValidateToken(token)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if claims, ok := t.Claims.(jwt.MapClaims); ok {
-			if sub, ok := claims["sub"].(string); ok {
-				return sub, nil
+			sub, ok := claims["sub"].(string)
+			if !ok {
+				return "", "", errors.New("sub claim missing in token")
 			}
+			// Auto-generate API key on first auth
+			existing, listErr := s.st.ListAPIKeys(ctx, sub)
+			if listErr == nil && len(existing) == 0 {
+				rawKey, keyHash, genErr := generateAPIKey()
+				if genErr == nil {
+					if createErr := s.st.CreateAPIKey(ctx, keyHash, sub, "auto-generated", "developer", nil); createErr == nil {
+						return sub, rawKey, nil
+					}
+				}
+			}
+			return sub, "", nil
 		}
-		return "", errors.New("sub claim missing in token")
+		return "", "", errors.New("sub claim missing in token")
 	}
-	return "", errors.New("invalid api key or jwt")
+	return "", "", errors.New("invalid api key or jwt")
 }
 
 func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
@@ -969,6 +1113,35 @@ func (s *Server) subscribeResults() {
 	log.Printf("subscribed to jobs.results (%v)", sub)
 }
 
+// reapStaleJobs periodically marks jobs stuck in queued/created/running as failed.
+// This prevents billing leaks and client hangs when agents die mid-job.
+func (s *Server) reapStaleJobs(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	const maxAge = 10 * time.Minute
+
+	for range ticker.C {
+		reaped, err := s.st.ReapStaleJobs(ctx, maxAge)
+		if err != nil {
+			log.Printf("reaper: failed to reap stale jobs: %v", err)
+			continue
+		}
+		for _, jobID := range reaped {
+			log.Printf("reaper: marked stale job %s as failed", jobID)
+			owner, _ := s.st.JobGet(ctx, jobID, "owner")
+			if owner != "" {
+				failMsg, _ := json.Marshal(map[string]string{
+					"job_id": jobID,
+					"status": "error",
+					"error":  "job timed out — agent did not complete within 10 minutes",
+				})
+				s.sendWS(owner, string(failMsg))
+			}
+		}
+	}
+}
+
 func (s *Server) sendWS(userID, payload string) {
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
@@ -1025,7 +1198,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, err := s.validateAuth(authMsg.Token)
+	userID, _, err := s.validateAuth(authMsg.Token)
 	if err != nil {
 		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth_error","error":"unauthorized"}`))
 		conn.Close()

@@ -92,14 +92,15 @@ cd tenxo && pip install -e . && \
     --api-key dev-local-abc123
 ```
 
-Register a test API key in Redis:
+Register a test API key in PostgreSQL:
 
 ```bash
 # Hash the key with SHA-256
 echo -n "dev-local-abc123" | sha256sum
 # Returns a hex hash; let's say it's abc123...
-# Then set it in Redis:
-docker compose exec redis redis-cli SET api_key:<hex_hash> local-dev-user
+# Then insert it into PostgreSQL:
+docker compose exec postgres psql -U postgres -d tenxo -c \
+  "INSERT INTO api_keys (key_hash, user_id) VALUES ('<hex_hash>', 'local-dev-user') ON CONFLICT DO NOTHING;"
 ```
 
 ## Cryptographic Protocol

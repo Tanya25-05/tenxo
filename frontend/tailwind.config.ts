@@ -36,6 +36,15 @@ const config: Config = {
       spacing: {
         "section": "8rem",
       },
+      keyframes: {
+        "dot-pulse": {
+          "0%, 100%": { opacity: "0.15", transform: "scale(0.8)" },
+          "50%": { opacity: "0.6", transform: "scale(1.1)" },
+        },
+      },
+      animation: {
+        "dot-pulse": "dot-pulse 2.5s ease-in-out infinite",
+      },
     },
   },
   plugins: [],

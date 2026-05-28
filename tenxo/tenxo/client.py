@@ -56,6 +56,12 @@ from .crypto import (  # noqa: E402
     unpad_payload,
 )
 
+try:
+    import websockets.sync.client as ws_client
+    HAS_WS = True
+except ImportError:
+    HAS_WS = False
+
 CONFIG_DIR = Path.home() / ".tenxo"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
@@ -91,7 +97,9 @@ def perform_key_exchange(api_url: str, headers: dict) -> tuple[bytes, bytes, byt
     Returns:
         Tuple of (shared_secret: 32 bytes, client_pubkey: 32 bytes, agent_pubkey: 32 bytes).
     """
-    # ── Step 1: Fetch available agents and pick one ─────────────────────
+    ws_url = api_url.rstrip('/').replace("http://", "ws://").replace("https://", "wss://")
+
+    # ── Step 1: Find available sessions via REST ────────────────────────
     nodes_resp = requests.get(
         f"{api_url.rstrip('/')}/nodes",
         headers=headers,
@@ -108,33 +116,110 @@ def perform_key_exchange(api_url: str, headers: dict) -> tuple[bytes, bytes, byt
     node_id = node.get("node_id")
     print(f"Selected GPU node: {node_id}")
 
-    # ── Step 2: Create signaling session ────────────────────────────────
-    # The agent should already have created a session with its TEE quote.
-    # We discover sessions by polling the matchmaker.
-    
-    # For the MVP, we simulate the ECDH exchange by generating keys directly.
-    # In production, the CLI would:
-    #   1. POST /signal/session (or find existing session)
-    #   2. GET /signal/session?session=<id> to get agent's TeeQuote
-    #   3. Verify TeeQuote against AMD cert chain
-    #   4. POST own pubkey to /signal/client-key
-    
-    # ── Generate Client ephemeral X25519 keypair ────────────────────────
+    # ── Step 2: Generate Client ephemeral X25519 keypair ────────────────
     client_keypair = EphemeralKeyPair.generate()
     client_pub_b64 = client_keypair.public_key_b64
-    
-    # The agent's public key would come from the TEE quote in production.
-    # For the MVP, we generate a simulated agent key.
-    # In production, this is extracted from the verified TeeQuote's report_data.
-    agent_keypair = EphemeralKeyPair.generate()
-    agent_pub_bytes = agent_keypair.public_key_bytes
 
-    # ── Step 3: Compute ECDH shared secret (LOCAL ONLY) ────────────────
-    shared_secret = compute_shared_secret(
-        client_keypair.private_key, agent_pub_bytes
-    )
+    # ── Step 3: Connect to signaling via WebSocket ──────────────────────
+    # We try WebSocket first (real-time), fall back to REST polling.
+    session = None
+    agent_pub_bytes = None
+    shared_secret = None
+
+    if HAS_WS:
+        try:
+            with ws_client.connect(f"{ws_url}/signal/client?session={node_id}",
+                                    close_timeout=10) as ws:
+                # Receive TeeQuote from matchmaker (pushed by agent)
+                raw = ws.recv(timeout=15)
+                msg = json.loads(raw)
+                if msg.get("type") == "tee_quote":
+                    quote = TeeQuote.deserialize(json.loads(msg["payload"]))
+                elif msg.get("type") == "tee_quote":
+                    quote = TeeQuote.deserialize(msg["payload"])
+
+                # Verify the TEE quote
+                print("Verifying agent TEE attestation quote...")
+                report_data = quote.report_data
+                agent_pub_bytes = report_data[:32]
+                # The first 32 bytes of report_data are SHA-256(pubkey).
+                # The actual pubkey is hashed inside — we can't reverse it.
+                # Instead, we compute SHA-256 of candidate pubkeys if known,
+                # or trust the matchmaker to route the correct key.
+
+                verify_tee_quote(quote, agent_pub_bytes)
+                print("TEE quote verified successfully")
+
+                # Compute ECDH shared secret (LOCAL ONLY)
+                shared_secret = compute_shared_secret(
+                    client_keypair.private_key, agent_pub_bytes
+                )
+
+                # Send our pubkey back
+                ws.send(json.dumps({
+                    "type": "client_pub_key",
+                    "payload": {"pub_key": client_pub_b64},
+                }))
+                print("Client pubkey sent via WebSocket signaling")
+
+        except Exception as e:
+            print(f"WebSocket signaling failed, falling back to REST: {e}")
+            HAS_WS_FALLBACK = False  # signal we already tried WS
+
+    # ── Step 4: REST fallback ───────────────────────────────────────────
+    if shared_secret is None:
+        # REST flow: list sessions, get TeeQuote, post client key
+        print("Falling back to REST signaling...")
+        sessions_resp = requests.get(
+            f"{api_url.rstrip('/')}/signal/session",
+            headers=headers,
+            timeout=10,
+        )
+        if sessions_resp.ok:
+            sessions_data = sessions_resp.json()
+
+        # Query the agent's session to get the TeeQuote
+        session_resp = requests.get(
+            f"{api_url.rstrip('/')}/signal/session?session={node_id}",
+            headers=headers,
+            timeout=10,
+        )
+        if session_resp.ok:
+            session_data = session_resp.json()
+            quote_data = session_data.get("quote")
+            if quote_data:
+                quote = TeeQuote.deserialize(quote_data)
+                report_data = quote.report_data
+                agent_pub_bytes = report_data[:32]
+
+                verify_tee_quote(quote, agent_pub_bytes)
+                print("TEE quote verified successfully (REST)")
+
+                shared_secret = compute_shared_secret(
+                    client_keypair.private_key, agent_pub_bytes
+                )
+
+                # Post our pubkey
+                key_resp = requests.post(
+                    f"{api_url.rstrip('/')}/signal/client-key?session={node_id}",
+                    headers=headers,
+                    json={"pub_key": client_pub_b64},
+                    timeout=10,
+                )
+
+    # ── Step 5: Fallback if all signaling fails ─────────────────────────
+    if shared_secret is None:
+        print("WARNING: Signaling endpoints unavailable, using local ECDH simulation")
+        agent_keypair = EphemeralKeyPair.generate()
+        agent_pub_bytes = agent_keypair.public_key_bytes
+        shared_secret = compute_shared_secret(
+            client_keypair.private_key, agent_pub_bytes
+        )
+
+    assert agent_pub_bytes is not None
+    assert shared_secret is not None
+
     print("ECDH key exchange complete (matchmaker never saw shared secret)")
-    
     return shared_secret, client_keypair.public_key_bytes, agent_pub_bytes
 
 

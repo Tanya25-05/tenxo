@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowUpRight,
   Clock3,
+  Copy,
   Cpu,
   CreditCard,
   Gauge,
@@ -13,6 +14,7 @@ import {
   Plus,
   ShieldCheck,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import { Button } from "@/components/ui/Button";
@@ -24,6 +26,10 @@ interface Node {
   node_id: string;
   status: string;
   ttl_seconds: number;
+  gpu_model?: string;
+  gpu_vram_mb?: number;
+  tee_attested: boolean;
+  tee_last_attested?: string;
 }
 
 interface Pod {
@@ -49,6 +55,10 @@ export default function DeveloperDashboard() {
   const [selectedGpuId, setSelectedGpuId] = useState(gpuTiers[0].id);
   const [meterRunning, setMeterRunning] = useState(false);
   const [meterSeconds, setMeterSeconds] = useState(0);
+  const [apiKeys, setApiKeys] = useState<any[]>([]);
+  const [apiKeysLoading, setApiKeysLoading] = useState(true);
+  const [newKey, setNewKey] = useState<string | null>(null);
+  const [copyIdx, setCopyIdx] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -61,6 +71,7 @@ export default function DeveloperDashboard() {
     if (!session?.access_token) return;
     fetchNetworkStatus(session.access_token);
     fetchPods(session.access_token);
+    fetchAPIKeys(session.access_token);
   }, [session?.access_token]);
 
   const fetchPods = async (token: string) => {
@@ -73,6 +84,21 @@ export default function DeveloperDashboard() {
       // silent
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchAPIKeys = async (token: string) => {
+    try {
+      const res = await fetch(`${API_URL}/api/keys`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      setApiKeys(data.keys || []);
+      if (data._new_key) setNewKey(data._new_key);
+    } catch {
+      // silent
+    } finally {
+      setApiKeysLoading(false);
     }
   };
 
@@ -333,9 +359,10 @@ export default function DeveloperDashboard() {
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
                 <thead>
-                  <tr className="border-b border-white/[0.08]">
+                    <tr className="border-b border-white/[0.08]">
                     <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider   text-text-tertiary">Node ID</th>
                     <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider   text-text-tertiary">Status</th>
+                    <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider   text-text-tertiary">TEE</th>
                     <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider   text-text-tertiary">Price / Hr</th>
                     <th className="px-6 py-3 text-[11px] font-semibold uppercase tracking-wider   text-text-tertiary">Availability</th>
                   </tr>
@@ -343,7 +370,7 @@ export default function DeveloperDashboard() {
                 <tbody>
                   {networkNodes.length === 0 && !loadingNetwork ? (
                     <tr>
-                      <td colSpan={4} className="px-6 py-8 text-center text-xs   text-text-tertiary">
+                      <td colSpan={5} className="px-6 py-8 text-center text-xs   text-text-tertiary">
                         No idle nodes currently available on the grid.
                       </td>
                     </tr>
@@ -358,6 +385,17 @@ export default function DeveloperDashboard() {
                             <span className="size-1.5 rounded-full bg-emerald-500/70" />
                             {node.status}
                           </span>
+                        </td>
+                        <td className="px-6 py-3">
+                          {node.tee_attested ? (
+                            <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
+                              Verified
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
+                              Unverified
+                            </span>
+                          )}
                         </td>
                         <td className="px-6 py-3 text-xs text-text-secondary">$0.15</td>
                         <td className="px-6 py-3 text-xs   text-text-tertiary">Ready for match</td>
@@ -403,25 +441,128 @@ export default function DeveloperDashboard() {
           </section>
 
           <section className="rounded-xl border border-white/[0.08] bg-[#0c0c0d] p-6">
-            <p className="text-[10px] font-semibold tracking-widest   text-text-tertiary uppercase">
-              Controls
-            </p>
-            <h2 className="mt-1 text-lg font-semibold text-white">MVP readiness</h2>
-            <div className="mt-5 space-y-3">
-              {[
-                ["Supabase auth", "Active session gated console"],
-                ["Go matchmaker", "Live nodes and pods endpoints wired"],
-                ["Secure workers", "Token-based API access ready"],
-              ].map(([label, value]) => (
-                <div key={label} className="flex items-center justify-between gap-4 rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-3">
-                  <span className="text-xs   text-text-tertiary">{label}</span>
-                  <span className="text-xs font-medium text-white">{value}</span>
-                </div>
-              ))}
+            <div className="mb-6 flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[10px] font-semibold tracking-widest   text-text-tertiary uppercase">
+                  API Keys
+                </p>
+                <h2 className="mt-1 text-lg font-semibold text-white">Manage access keys</h2>
+                <p className="mt-2 text-xs   text-text-tertiary">
+                  API keys for CLI and automation. Keys are auto-generated on first visit and use <code className="rounded bg-white/[0.06] px-1 py-0.5 font-mono text-[11px]">txn_</code> prefix.
+                </p>
+              </div>
             </div>
+
+            {newKey && (
+              <div className="mb-4 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+                <p className="text-xs font-medium text-emerald-400">New API key created — copy it now</p>
+                <p className="mt-1 text-[11px] text-text-tertiary">You won't be able to see it again once dismissed.</p>
+                <div className="relative mt-3">
+                  <input
+                    type="text"
+                    readOnly
+                    value={newKey}
+                    className="w-full rounded-lg border border-white/[0.08] bg-black/40 px-4 py-2.5 font-mono text-xs text-text-secondary outline-none pr-20"
+                  />
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(newKey); setCopyIdx('_new'); setTimeout(() => setCopyIdx(null), 1600); }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary hover:text-text-primary"
+                  >
+                    {copyIdx === '_new' ? "Copied!" : "Copy"}
+                  </button>
+                </div>
+                <button onClick={() => setNewKey(null)} className="mt-3 text-[11px] font-medium text-text-tertiary hover:text-text-secondary">
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* Key list */}
+            <APIKeyList token={session.access_token} />
           </section>
         </div>
       )}
+    </div>
+  );
+}
+
+function APIKeyList({ token }: { token: string }) {
+  const [keys, setKeys] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchKeys = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/keys`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      setKeys(data.keys || []);
+    } catch {
+      // silent
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => { fetchKeys(); }, [fetchKeys]);
+
+  const revokeKey = async (id: string) => {
+    if (!confirm("Revoke this API key? Existing integrations using it will stop working.")) return;
+    try {
+      await fetch(`${API_URL}/api/keys/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      fetchKeys();
+    } catch {
+      // silent
+    }
+  };
+
+  const copyKeyId = (id: string) => {
+    navigator.clipboard.writeText(id.substring(0, 12) + "...");
+  };
+
+  if (loading) {
+    return <div className="py-8 text-center text-xs text-text-tertiary">Loading keys...</div>;
+  }
+
+  if (keys.length === 0) {
+    return (
+      <div className="mt-6 rounded-lg border border-dashed border-white/[0.08] py-8 text-center">
+        <KeyRound className="mx-auto size-5 text-text-tertiary" />
+        <p className="mt-2 text-xs text-text-tertiary">No API keys yet. Create one to get started.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-6 space-y-2">
+      {keys.map((key) => (
+        <div key={key.id} className="flex items-center justify-between gap-4 rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-white">{key.name}</span>
+              <span className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[10px] text-text-tertiary uppercase">{key.role}</span>
+              {!key.is_active && (
+                <span className="rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-red-400">Revoked</span>
+              )}
+            </div>
+            <div className="mt-0.5 flex items-center gap-3 font-mono text-[10px] text-text-tertiary">
+              <span title={key.id}>{key.id.substring(0, 16)}...</span>
+              <span>Created {new Date(key.created_at).toLocaleDateString()}</span>
+              {key.last_used_at && <span>Last used {new Date(key.last_used_at).toLocaleDateString()}</span>}
+            </div>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            {key.is_active && (
+              <button onClick={() => revokeKey(key.id)} className="rounded-md p-1.5 text-text-tertiary hover:text-red-400 hover:bg-red-500/10" title="Revoke key">
+                <Trash2 className="size-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
