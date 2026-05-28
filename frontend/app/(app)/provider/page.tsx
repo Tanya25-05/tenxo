@@ -22,6 +22,9 @@ interface Node {
   node_id: string;
   status: string;
   ttl_seconds: number;
+  gpu_model?: string;
+  gpu_vram_mb?: number;
+  tee_attested?: boolean;
 }
 
 export default function ProviderDashboard() {
@@ -41,6 +44,8 @@ export default function ProviderDashboard() {
   useEffect(() => {
     if (!session?.access_token) return;
     fetchMyNodes(session.access_token);
+    const timer = setInterval(() => fetchMyNodes(session.access_token), 10000);
+    return () => clearInterval(timer);
   }, [session?.access_token]);
 
   const fetchMyNodes = async (token: string) => {
@@ -63,7 +68,12 @@ export default function ProviderDashboard() {
     return Math.round(total / myNodes.length);
   }, [myNodes]);
 
-  const installScript = `curl -sSL https://tenxo.com/install.sh | bash -s -- --token ${session?.access_token?.substring(0, 20)}...`;
+  const totalVRAM = useMemo(
+    () => myNodes.reduce((sum, n) => sum + Number(n.gpu_vram_mb || 0), 0),
+    [myNodes],
+  );
+
+  const installScript = `TENXO_TOKEN="<paste-api-key>" curl -sSL https://tenxo.com/install.sh | bash`;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(installScript);
@@ -96,7 +106,7 @@ export default function ProviderDashboard() {
       {/* Metrics */}
       <section className="mb-6 grid gap-4 sm:grid-cols-3">
         <MetricCard icon={Server} label="Active GPUs" value={loading ? "..." : myNodes.length} helper="Worker agents authenticated to your account." />
-        <MetricCard icon={Wallet} label="Daily Earnings" value="$0.00" helper="Projected until live billing lands." />
+        <MetricCard icon={Wallet} label="Daily Earnings" value="$0.00" helper="Payout ledger pending marketplace settlement." />
         <MetricCard icon={Timer} label="Heartbeat TTL" value={`${avgTtl}s`} helper="Average heartbeat expiry across workers." />
       </section>
 
@@ -156,6 +166,7 @@ export default function ProviderDashboard() {
               <thead>
                 <tr className="border-b border-white/[0.08]">
                   <th className="pb-3 pr-4 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">Node ID</th>
+                  <th className="pb-3 pr-4 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">GPU</th>
                   <th className="pb-3 pr-4 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">Status</th>
                   <th className="pb-3 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">Last Heartbeat</th>
                 </tr>
@@ -163,13 +174,13 @@ export default function ProviderDashboard() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={3} className="py-8 text-center text-xs text-text-tertiary">
+                    <td colSpan={4} className="py-8 text-center text-xs text-text-tertiary">
                       Loading fleet data...
                     </td>
                   </tr>
                 ) : myNodes.length === 0 ? (
                   <tr>
-                    <td colSpan={3} className="py-8 text-center text-xs text-text-tertiary">
+                    <td colSpan={4} className="py-8 text-center text-xs text-text-tertiary">
                       No nodes connected yet. Run the install command to add your first GPU.
                     </td>
                   </tr>
@@ -177,6 +188,9 @@ export default function ProviderDashboard() {
                   myNodes.map((node) => (
                     <tr key={node.node_id} className="border-b border-white/[0.04] transition-colors last:border-0 hover:bg-white/[0.02]">
                       <td className="py-3 pr-4 font-mono text-xs text-text-secondary">{node.node_id}</td>
+                      <td className="py-3 pr-4 text-xs text-text-secondary">
+                        {node.gpu_model || "Unknown"} {node.gpu_vram_mb ? `· ${(node.gpu_vram_mb / 1024).toFixed(0)} GB` : ""}
+                      </td>
                       <td className="py-3 pr-4">
                         <span className="inline-flex items-center gap-1.5 text-xs text-text-tertiary">
                           <span className="size-1.5 rounded-full bg-emerald-500/70" />
@@ -189,6 +203,9 @@ export default function ProviderDashboard() {
                 )}
               </tbody>
             </table>
+          </div>
+          <div className="mt-4 text-[11px] text-text-tertiary">
+            Fleet capacity: {(totalVRAM / 1024).toFixed(0)} GB VRAM across live nodes.
           </div>
         </Card>
       </section>

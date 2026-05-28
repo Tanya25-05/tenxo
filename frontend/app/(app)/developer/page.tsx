@@ -19,6 +19,7 @@ import {
 import { supabase } from "@/lib/supabaseClient";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { useNatsSocket, type JobUpdate } from "@/components/hooks/useNatsSocket";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
@@ -33,8 +34,20 @@ interface Node {
 }
 
 interface Pod {
-  id: string;
-  name: string;
+  job_id: string;
+  status: string;
+  gpu_model?: string;
+  result_url?: string;
+  updated_at?: string;
+}
+
+interface Metrics {
+  nodes_total: number;
+  nodes_available: number;
+  total_vram_mb: number;
+  jobs_total: number;
+  jobs_active: number;
+  gpu_inventory: Array<{ sku: string; total: number; available: number; vram_mb: number }>;
 }
 
 const gpuTiers = [
@@ -48,6 +61,7 @@ export default function DeveloperDashboard() {
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [activeTab, setActiveTab] = useState("pods");
   const [pods, setPods] = useState<Pod[]>([]);
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [loading, setLoading] = useState(true);
   const [networkNodes, setNetworkNodes] = useState<Node[]>([]);
   const [loadingNetwork, setLoadingNetwork] = useState(true);
@@ -72,14 +86,39 @@ export default function DeveloperDashboard() {
     fetchNetworkStatus(session.access_token);
     fetchPods(session.access_token);
     fetchAPIKeys(session.access_token);
+    fetchMetrics(session.access_token);
+    const timer = setInterval(() => {
+      fetchNetworkStatus(session.access_token);
+      fetchPods(session.access_token);
+      fetchMetrics(session.access_token);
+    }, 10000);
+    return () => clearInterval(timer);
   }, [session?.access_token]);
+
+  const handleJobUpdate = useCallback((update: JobUpdate) => {
+    setPods((current) =>
+      current.map((job) =>
+        job.job_id === update.job_id
+          ? { ...job, status: update.status, result_url: update.result_url || job.result_url }
+          : job,
+      ),
+    );
+  }, []);
+
+  const { status: socketStatus } = useNatsSocket({
+    token: session?.access_token,
+    onJobUpdate: handleJobUpdate,
+  });
 
   const fetchPods = async (token: string) => {
     try {
       const res = await fetch(`${API_URL}/jobs`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) setPods(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        setPods(data.jobs || []);
+      }
     } catch {
       // silent
     } finally {
@@ -122,9 +161,20 @@ export default function DeveloperDashboard() {
     }
   };
 
+  const fetchMetrics = async (token: string) => {
+    try {
+      const res = await fetch(`${API_URL}/metrics`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setMetrics(await res.json());
+    } catch {
+      // silent
+    }
+  };
+
   const estimatedHourly = useMemo(
-    () => (networkNodes.length * 0.15).toFixed(2),
-    [networkNodes.length],
+    () => ((metrics?.nodes_available ?? networkNodes.length) * 0.15).toFixed(2),
+    [metrics?.nodes_available, networkNodes.length],
   );
   const selectedGpu = useMemo(
     () => gpuTiers.find((t) => t.id === selectedGpuId) || gpuTiers[0],
@@ -169,7 +219,7 @@ export default function DeveloperDashboard() {
         </div>
         <div className="flex items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.03] px-3.5 py-1.5 text-[11px] font-medium text-text-secondary">
           <span className="size-1.5 rounded-full bg-emerald-500/70" />
-          {loadingNetwork ? "Scanning grid" : `${networkNodes.length} GPUs idle`}
+          {loadingNetwork ? "Scanning grid" : `${metrics?.nodes_available ?? networkNodes.length} GPUs idle`}
         </div>
       </div>
 
@@ -197,8 +247,8 @@ export default function DeveloperDashboard() {
         <div className="space-y-6">
           {/* Metrics */}
           <section className="grid gap-4 sm:grid-cols-3">
-            <MetricCard icon={Cpu} label="Available GPUs" value={loadingNetwork ? "..." : networkNodes.length} helper="Live nodes reported by the matchmaker." />
-            <MetricCard icon={Layers3} label="Active Pods" value={loading ? "..." : pods.length} helper="Current developer workloads from /pods." />
+            <MetricCard icon={Cpu} label="Available GPUs" value={loadingNetwork ? "..." : metrics?.nodes_available ?? networkNodes.length} helper={`${((metrics?.total_vram_mb ?? 0) / 1024).toFixed(0)} GB aggregate VRAM online.`} />
+            <MetricCard icon={Layers3} label="Active Jobs" value={loading ? "..." : metrics?.jobs_active ?? pods.length} helper={`Socket ${socketStatus}; ${metrics?.jobs_total ?? pods.length} jobs tracked.`} />
             <MetricCard icon={Sparkles} label="Grid Cost / Hr" value={`$${estimatedHourly}`} helper="Baseline marketplace estimate." />
           </section>
 
@@ -324,17 +374,17 @@ export default function DeveloperDashboard() {
             ) : (
               <div className="divide-y divide-white/[0.06]">
                 {pods.map((pod) => (
-                  <div key={pod.id} className="flex flex-col gap-4 p-5 transition-colors hover:bg-white/[0.02] sm:flex-row sm:items-center sm:justify-between">
+                  <div key={pod.job_id} className="flex flex-col gap-4 p-5 transition-colors hover:bg-white/[0.02] sm:flex-row sm:items-center sm:justify-between">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="size-1.5 rounded-full bg-emerald-500/70" />
-                        <p className="text-sm font-medium text-white">{pod.name}</p>
+                        <p className="text-sm font-medium text-white">{pod.gpu_model || "Tenxo job"}</p>
                       </div>
-                      <p className="mt-1 truncate font-mono text-xs   text-text-tertiary">{pod.id}</p>
+                      <p className="mt-1 truncate font-mono text-xs   text-text-tertiary">{pod.job_id} · {pod.status}</p>
                     </div>
                     <Button variant="ghost" size="sm">
                       <Play className="size-3.5" />
-                      Resume
+                      Details
                     </Button>
                   </div>
                 ))}
@@ -405,6 +455,19 @@ export default function DeveloperDashboard() {
                 </tbody>
               </table>
             </div>
+            {metrics?.gpu_inventory?.length ? (
+              <div className="border-t border-white/[0.08] px-6 py-4">
+                <p className="mb-3 text-[10px] font-semibold uppercase tracking-widest text-text-tertiary">GPU SKU Inventory</p>
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {metrics.gpu_inventory.map((sku) => (
+                    <div key={sku.sku} className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
+                      <p className="text-sm font-medium text-white">{sku.sku}</p>
+                      <p className="mt-1 text-xs text-text-tertiary">{sku.available}/{sku.total} available · {(sku.vram_mb / 1024).toFixed(0)} GB VRAM</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </section>
         </div>
       ) : (

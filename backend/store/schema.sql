@@ -20,9 +20,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     salt_b64 TEXT NOT NULL DEFAULT '',
     upload_path TEXT NOT NULL DEFAULT '',
     result_path TEXT NOT NULL DEFAULT '',
+    gpu_model TEXT NOT NULL DEFAULT '',
+    gpu_vram_mb INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS gpu_model TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS gpu_vram_mb INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_jobs_owner_updated_at ON jobs(owner, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_status_updated_at ON jobs(status, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS api_keys (
     key_hash TEXT PRIMARY KEY,
@@ -59,3 +66,18 @@ CREATE TABLE IF NOT EXISTS usage_records (
     elapsed_seconds BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, job_id)
 );
+
+CREATE TABLE IF NOT EXISTS payment_transactions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    job_id TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL,
+    amount_cents BIGINT NOT NULL DEFAULT 0,
+    gpu_seconds BIGINT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'completed',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_user_created_at
+    ON payment_transactions(user_id, created_at DESC);

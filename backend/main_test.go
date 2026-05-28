@@ -13,9 +13,10 @@ import (
 )
 
 // e2eTest simulates the full Tenxo workflow:
-//   User A (developer) signs in, gets API key auto-generated, submits a job
-//   User B (provider) signs in, registers a node with TEE attestation
-//   Billing is tracked per-second, reaper closes stale jobs
+//
+//	User A (developer) signs in, gets API key auto-generated, submits a job
+//	User B (provider) signs in, registers a node with TEE attestation
+//	Billing is tracked per-second, reaper closes stale jobs
 func TestFullWorkflowE2E(t *testing.T) {
 	mock := store.NewMockStore()
 	srv := &Server{st: mock}
@@ -98,6 +99,13 @@ func TestFullWorkflowE2E(t *testing.T) {
 	}
 	if owner != userA {
 		t.Fatalf("expected owner %s, got %s", userA, owner)
+	}
+	jobs, err := mock.ListJobsByOwner(context.Background(), userA, 10)
+	if err != nil {
+		t.Fatal("ListJobsByOwner:", err)
+	}
+	if len(jobs) != 1 || jobs[0].JobID != jobID {
+		t.Fatalf("expected owner-scoped job list to include %s, got %#v", jobID, jobs)
 	}
 
 	// Verify encryption key was generated
@@ -215,7 +223,7 @@ func TestFullWorkflowE2E(t *testing.T) {
 
 	// Mark job as "running" in the past
 	if err := mock.JobSet(context.Background(), jobID, map[string]string{
-		"status":    "running",
+		"status":     "running",
 		"started_at": time.Now().Add(-10 * time.Minute).Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal("JobSet:", err)
@@ -246,8 +254,8 @@ func TestFullWorkflowE2E(t *testing.T) {
 		t.Fatalf("handleAPIKeys GET expected 200, got %d", apiKeysW.Code)
 	}
 	var keysResp struct {
-		Keys    []store.APIKeyInfo `json:"keys"`
-		NewKey  string             `json:"_new_key,omitempty"`
+		Keys   []store.APIKeyInfo `json:"keys"`
+		NewKey string             `json:"_new_key,omitempty"`
 	}
 	if err := json.NewDecoder(apiKeysW.Body).Decode(&keysResp); err != nil {
 		t.Fatal("decode api keys response:", err)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,15 +60,16 @@ type JobRequest struct {
 	JobID            string `json:"job_id"`
 	EncKeyB64        string `json:"enc_key_b64"`
 	SaltB64          string `json:"salt_b64"`
+	GPUModel         string `json:"gpu_model"`
 }
 
 type HeartbeatPayload struct {
-	NodeID         string `json:"node_id"`
-	Status         string `json:"status"`
-	Owner          string `json:"owner"`
-	GPUModel       string `json:"gpu_model"`
-	GPUVRAMMB      int    `json:"gpu_vram_mb"`
-	TEEAttested    bool   `json:"tee_attested"`
+	NodeID      string `json:"node_id"`
+	Status      string `json:"status"`
+	Owner       string `json:"owner"`
+	GPUModel    string `json:"gpu_model"`
+	GPUVRAMMB   int    `json:"gpu_vram_mb"`
+	TEEAttested bool   `json:"tee_attested"`
 }
 
 type NodeInfo struct {
@@ -156,6 +159,7 @@ func main() {
 
 	// Authenticated endpoints
 	http.HandleFunc("/jobs", cors(srv.authMiddleware(srv.handleJobs)))
+	http.HandleFunc("/metrics", cors(srv.authMiddleware(srv.handleMetrics)))
 	http.HandleFunc("/nodes", cors(srv.authMiddleware(srv.handleNodes)))
 	http.HandleFunc("/my-nodes", cors(srv.authMiddleware(srv.handleMyNodes)))
 	http.HandleFunc("/presign", cors(srv.authMiddleware(srv.handlePresign)))
@@ -177,9 +181,9 @@ func main() {
 	// Billing / Razorpay — Vast.ai/RunPod model (pay-as-you-go, card + UPI)
 	paymentHandler := payment.NewBillingHandler(st)
 	if paymentHandler.Enabled() {
-		http.HandleFunc("/billing/customer", cors(srv.authMiddleware(paymentHandler.HandleCreateCustomer)))
-		http.HandleFunc("/billing/setup-intent", cors(srv.authMiddleware(paymentHandler.HandleCreateSetupIntent)))
-		http.HandleFunc("/billing/verify-payment", cors(srv.authMiddleware(paymentHandler.HandleVerifyPayment)))
+		http.HandleFunc("/billing/customer", cors(srv.authMiddleware(srv.withAuthenticatedBillingUser(paymentHandler.HandleCreateCustomer))))
+		http.HandleFunc("/billing/setup-intent", cors(srv.authMiddleware(srv.withAuthenticatedBillingUser(paymentHandler.HandleCreateSetupIntent))))
+		http.HandleFunc("/billing/verify-payment", cors(srv.authMiddleware(srv.withAuthenticatedBillingUser(paymentHandler.HandleVerifyPayment))))
 		http.HandleFunc("/billing/payment-methods", cors(srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			userID, _ := r.Context().Value(userIDKey).(string)
 			q := r.URL.Query()
@@ -187,14 +191,24 @@ func main() {
 			r.URL.RawQuery = q.Encode()
 			paymentHandler.HandleListPaymentMethods(w, r)
 		})))
-		http.HandleFunc("/billing/track-usage", cors(srv.authMiddleware(paymentHandler.HandleTrackUsage)))
-		http.HandleFunc("/billing/charge", cors(srv.authMiddleware(paymentHandler.HandleCharge)))
+		http.HandleFunc("/billing/track-usage", cors(srv.authMiddleware(srv.withAuthenticatedBillingUser(paymentHandler.HandleTrackUsage))))
+		http.HandleFunc("/billing/charge", cors(srv.authMiddleware(srv.withAuthenticatedBillingUser(paymentHandler.HandleCharge))))
 		http.HandleFunc("/billing/usage", cors(srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			userID, _ := r.Context().Value(userIDKey).(string)
 			q := r.URL.Query()
 			q.Set("user_id", userID)
 			r.URL.RawQuery = q.Encode()
 			paymentHandler.HandleGetUsage(w, r)
+		})))
+		http.HandleFunc("/billing/transactions", cors(srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			userID, _ := r.Context().Value(userIDKey).(string)
+			transactions, err := srv.st.BillingListTransactions(r.Context(), userID, 50)
+			if err != nil {
+				http.Error(w, "failed to list transactions", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"transactions": transactions})
 		})))
 		http.HandleFunc("/billing/webhook", cors(paymentHandler.HandleWebhook)) // webhook has its own signature verification
 		log.Println("payment: Razorpay PAYG billing (card+UPI) — /billing/*")
@@ -330,9 +344,7 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if hb.Status == "" {
 		hb.Status = "idle"
 	}
-	if hb.Owner == "" {
-		hb.Owner = userID
-	}
+	hb.Owner = userID
 
 	ctx := r.Context()
 	if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner, hb.GPUModel, hb.GPUVRAMMB); err != nil {
@@ -347,6 +359,36 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) withAuthenticatedBillingUser(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := r.Context().Value(userIDKey).(string)
+		if !ok || userID == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+			body := map[string]any{}
+			if r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+					http.Error(w, "invalid JSON", http.StatusBadRequest)
+					return
+				}
+			}
+			body["user_id"] = userID
+			b, err := json.Marshal(body)
+			if err != nil {
+				http.Error(w, "failed to bind user", http.StatusInternalServerError)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(b))
+			r.ContentLength = int64(len(b))
+			r.Header.Set("Content-Type", "application/json")
+		}
+		next(w, r)
+	}
 }
 
 func getEnv(key, fallback string) string {
@@ -366,6 +408,24 @@ func sanitizeJobID(id string) string {
 		return ""
 	}
 	return id
+}
+
+func safeStoragePath(root, name string) (string, error) {
+	if name == "" || strings.ContainsAny(name, "/\\") {
+		return "", errors.New("invalid filename")
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	pathAbs, err := filepath.Abs(filepath.Join(rootAbs, name))
+	if err != nil {
+		return "", err
+	}
+	if pathAbs != rootAbs && !strings.HasPrefix(pathAbs, rootAbs+string(os.PathSeparator)) {
+		return "", errors.New("path escapes storage root")
+	}
+	return pathAbs, nil
 }
 
 func extractToken(r *http.Request) string {
@@ -529,6 +589,22 @@ func (s *Server) parseAndValidateToken(tokenStr string) (*jwt.Token, error) {
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		userID, ok := r.Context().Value(userIDKey).(string)
+		if !ok || userID == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		jobs, err := s.st.ListJobsByOwner(r.Context(), userID, limit)
+		if err != nil {
+			http.Error(w, "failed to list jobs", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"jobs": jobs})
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -564,6 +640,9 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		"owner":      userID,
 		"status":     "queued",
 		"upload_url": jobLink,
+	}
+	if payload.GPUModel != "" {
+		updates["gpu_model"] = payload.GPUModel
 	}
 	if payload.EncKeyB64 != "" {
 		updates["enc_key_b64"] = payload.EncKeyB64
@@ -681,6 +760,75 @@ func (s *Server) handleMyNodes(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"nodes": nodes})
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	ctx := r.Context()
+	nodeMap, err := s.st.GetAllNodes(ctx)
+	if err != nil {
+		http.Error(w, "failed to load node metrics", http.StatusInternalServerError)
+		return
+	}
+	jobs, err := s.st.ListJobsByOwner(ctx, userID, 100)
+	if err != nil {
+		http.Error(w, "failed to load job metrics", http.StatusInternalServerError)
+		return
+	}
+
+	gpuInventory := map[string]map[string]any{}
+	availableNodes := 0
+	totalVRAM := 0
+	for _, n := range nodeMap {
+		if strings.EqualFold(n.Status, "idle") {
+			availableNodes++
+		}
+		totalVRAM += n.GPUVRAMMB
+		model := n.GPUModel
+		if model == "" {
+			model = "unknown"
+		}
+		item, ok := gpuInventory[model]
+		if !ok {
+			item = map[string]any{"sku": model, "total": 0, "available": 0, "vram_mb": n.GPUVRAMMB}
+			gpuInventory[model] = item
+		}
+		item["total"] = item["total"].(int) + 1
+		if strings.EqualFold(n.Status, "idle") {
+			item["available"] = item["available"].(int) + 1
+		}
+	}
+
+	activeJobs := 0
+	for _, j := range jobs {
+		if j.Status == "queued" || j.Status == "running" || j.Status == "uploaded" || j.Status == "created" {
+			activeJobs++
+		}
+	}
+
+	inventory := make([]map[string]any, 0, len(gpuInventory))
+	for _, item := range gpuInventory {
+		inventory = append(inventory, item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"nodes_total":     len(nodeMap),
+		"nodes_available": availableNodes,
+		"total_vram_mb":   totalVRAM,
+		"jobs_total":      len(jobs),
+		"jobs_active":     activeJobs,
+		"gpu_inventory":   inventory,
+	})
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -890,7 +1038,11 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
 	uploadsDir := getEnv("UPLOADS_DIR", "uploads")
 
 	if r.Method == http.MethodGet {
-		filePath := filepath.Join(uploadsDir, jobID+".enc")
+		filePath, err := safeStoragePath(uploadsDir, jobID+".enc")
+		if err != nil {
+			http.Error(w, "invalid storage path", http.StatusBadRequest)
+			return
+		}
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
 			http.Error(w, "file not found", http.StatusNotFound)
 			return
@@ -907,7 +1059,11 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 512<<20) // 512 MB max upload
 
 	_ = os.MkdirAll(uploadsDir, 0o755)
-	filePath := filepath.Join(uploadsDir, jobID+".enc")
+	filePath, err := safeStoragePath(uploadsDir, jobID+".enc")
+	if err != nil {
+		http.Error(w, "invalid storage path", http.StatusBadRequest)
+		return
+	}
 	f, err := os.Create(filePath)
 	if err != nil {
 		http.Error(w, "failed to create file", http.StatusInternalServerError)
@@ -957,7 +1113,11 @@ func (s *Server) handleStorageResultUpload(w http.ResponseWriter, r *http.Reques
 	uploadsDir := getEnv("UPLOADS_DIR", "uploads")
 	_ = os.MkdirAll(uploadsDir, 0o755)
 	r.Body = http.MaxBytesReader(w, r.Body, 512<<20) // 512 MB max upload
-	filePath := filepath.Join(uploadsDir, jobID+".result.enc")
+	filePath, err := safeStoragePath(uploadsDir, jobID+".result.enc")
+	if err != nil {
+		http.Error(w, "invalid storage path", http.StatusBadRequest)
+		return
+	}
 	f, err := os.Create(filePath)
 	if err != nil {
 		http.Error(w, "failed to create file", http.StatusInternalServerError)
