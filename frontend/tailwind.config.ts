@@ -30,8 +30,6 @@ const config: Config = {
       },
       backgroundImage: {
         "hero-glow": "radial-gradient(ellipse 80% 80% at 50% -20%, rgba(94,106,210,0.12), transparent)",
-        "card-glow": "radial-gradient(ellipse 100% 100% at 50% 0%, rgba(255,255,255,0.03), transparent)",
-        "arch-glow": "linear-gradient(180deg, rgba(94,106,210,0.08) 0%, transparent 100%)",
       },
       spacing: {
         "section": "8rem",

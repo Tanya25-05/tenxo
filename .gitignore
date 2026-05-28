@@ -24,3 +24,4 @@ control-server/
 templates/
 frontend/out/
 edge_agent/Cargo.lock
+internal_docs/

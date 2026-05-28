@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import base64
 import os
-import struct
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, Optional
@@ -596,16 +596,4 @@ def encrypt_workspace(
     return base64.b64encode(salt).decode()
 
 
-# ─── Backward-Compatible API ────────────────────────────────────────────────
 
-def generate_key() -> bytes:
-    """Legacy: Generate a random AES-256 key (backward compat)."""
-    return AESGCM.generate_key(bit_length=256)
-
-
-def key_to_b64(key: bytes) -> str:
-    return base64.b64encode(key).decode()
-
-
-def key_from_b64(s: str) -> bytes:
-    return base64.b64decode(s)

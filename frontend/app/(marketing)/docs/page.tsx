@@ -1,4 +1,4 @@
-import { BookOpen, CheckCircle, Cpu, KeyRound, Layers3, Lock, Server, ShieldCheck, Terminal, Wallet } from "lucide-react";
+import { BookOpen, CheckCircle, Cpu, KeyRound, Server, ShieldCheck, Terminal, Wallet } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 
@@ -8,7 +8,6 @@ const sections = [
   { id: "developer-guide", label: "Developer Guide" },
   { id: "provider-guide", label: "Provider Guide" },
   { id: "cli-reference", label: "CLI Reference" },
-  { id: "architecture", label: "Architecture" },
   { id: "api-reference", label: "API Reference" },
   { id: "troubleshooting", label: "Troubleshooting" },
 ];
@@ -497,144 +496,6 @@ tenxo download job-a1b2c3d4`}</pre>
           </div>
         </section>
 
-        {/* ═══════════════════ ARCHITECTURE DEEP DIVE ═══════════════════ */}
-        <section id="architecture" className="mt-16 scroll-mt-20">
-          <div className="mb-3 flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded border border-white/[0.08] bg-white/[0.03]">
-              <Layers3 className="size-3 text-text-secondary" />
-            </span>
-            <p className="text-xs font-medium text-text-tertiary">Architecture</p>
-          </div>
-          <h2 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">
-            System architecture deep dive
-          </h2>
-
-          {/* ── Component diagram ── */}
-          <h3 className="mt-8 text-base font-semibold text-white">Component stack</h3>
-          <div className="mt-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-[#0c0c0d] p-5">
-            <pre className="text-[11px] leading-relaxed text-text-secondary font-mono">{`┌──────────────────────────────────────────────────────────┐
-│                    FRONTEND (Vercel)                     │
-│  Next.js + Supabase Auth + Tailwind                      │
-│  Pages: Developer Console, Provider Console, Marketing   │
-├──────────────────────────────────────────────────────────┤
-│                    MATCHMAKER (Go HTTP)                   │
-│  Routes: /jobs, /nodes, /presign, /ws, /api/keys        │
-│  Signaling: /signal/agent, /signal/client, /signal/*     │
-│  Payment: /billing/*  (Razorpay)                         │
-│  Storage: /storage/upload/*, /storage/result/*           │
-│  Dependencies: NATS (JetStream), PostgreSQL               │
-├──────────────────────────────────────────────────────────┤
-│                    GPU AGENT (Rust)                       │
-│  WebSocket bridge → NATS proxy                            │
-│  ECDH key exchange (x25519-dalek)                        │
-│  HKDF-SHA256 key derivation → AES-256-GCM decryption     │
-│  Docker sandbox: --network none --cap-drop ALL           │
-│  TEE attestation: AMD SEV-SNP / Intel TDX                │
-├──────────────────────────────────────────────────────────┤
-│                    INFRASTRUCTURE                         │
-│  NATS 2.10 — Message queue + JetStream persistence       │
-│  PostgreSQL — User state, nodes, jobs, billing            │
-│  Cloudflare R2 — Optional S3-compatible blob storage     │
-└──────────────────────────────────────────────────────────┘`}</pre>
-          </div>
-
-          {/* ── Zero-knowledge protocol ── */}
-          <h3 className="mt-10 text-base font-semibold text-white">Zero-knowledge key exchange protocol</h3>
-          <p className="mt-2 text-sm leading-relaxed text-text-tertiary">
-            The matchmaker <strong>never sees</strong> the AES-GCM encryption key. The protocol uses
-            ephemeral X25519 ECDH key agreement with HKDF key derivation to ensure forward secrecy
-            and zero-knowledge routing.
-          </p>
-
-          <div className="mt-4 grid gap-4 sm:grid-cols-3">
-            {[
-              { icon: KeyRound, title: "Ephemeral keys", text: "Both sides generate fresh X25519 keypairs per session. Private keys are never transmitted." },
-              { icon: Lock, title: "ECDH shared secret", text: "Each side computes the same 32-byte shared secret from the other's public key and their own private key." },
-              { icon: ShieldCheck, title: "HKDF key derivation", text: "The shared secret is fed through HKDF-SHA256 with a unique salt to produce the AES-256-GCM payload key." },
-            ].map((c) => (
-              <Card key={c.title} hover={false}>
-                <div className="mb-3 flex size-10 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
-                  <c.icon className="size-4 text-text-secondary" />
-                </div>
-                <h4 className="mb-1 text-sm font-semibold text-white">{c.title}</h4>
-                <p className="text-xs leading-relaxed text-text-tertiary">{c.text}</p>
-              </Card>
-            ))}
-          </div>
-
-          <div className="mt-6 overflow-x-auto rounded-xl border border-white/[0.08] bg-[#0c0c0d] p-5">
-            <pre className="text-[11px] leading-relaxed text-text-secondary font-mono">{`Key Exchange Flow:
-
-  Client (Alice)                      Matchmaker                      GPU Agent (Bob)
-       │                                   │                               │
-       │  POST /presign                     │                               │
-       │──────────────────────────────────>│                               │
-       │  <──── upload URLs, job_id ──────│                               │
-       │                                   │                               │
-       │  Upload encrypted payload         │                               │
-       │──────────────────────────────────>│                               │
-       │                                   │                               │
-       │  WS /signal/agent                 │                               │
-       │─────────────────────────────────────────────────────────────────>│
-       │                                   │  1. Challenge (32-byte nonce) │
-       │                                   │  <────────────────────────────│
-       │                                   │  2. TeeQuote + AgentPubKey    │
-       │                                   │  ────────────────────────────>│
-       │                                   │  (challenge in report_data)   │
-       │                                   │                               │
-       │  POST /signal/session             │                               │
-       │───────────────>│  creates session  │                               │
-       │  <──── session_id ───────────────│                               │
-       │                                   │                               │
-       │  GET /signal/session?id=...       │                               │
-       │  <─ TeeQuote + AgentPubKey ──────│                               │
-       │                                   │                               │
-       │  (Client verifies TEE quote       │                               │
-       │   generates ephemeral keypair,    │                               │
-       │   computes ECDH shared secret,    │                               │
-       │   derives AES key via HKDF)       │                               │
-       │                                   │                               │
-       │  POST /signal/client-key           │                               │
-       │  { xor_key, pub_key }             │                               │
-       │──────────────────────────────────>│                               │
-       │                                   │  routes to agent             │
-       │                                   │──────────────────────────────>│
-       │                                   │                               │
-       │                                   │  (Agent recovers AES key     │
-       │                                   │   via ECDH XOR, decrypts     │
-       │                                   │   payload, runs in Docker,   │
-       │                                   │   re-encrypts result)        │
-       │                                   │                               │
-       │  GET /jobs/{id}                   │                               │
-       │──────────────────────────────────>│                               │
-       │  <──── result_url ───────────────│                               │
-       │                                   │                               │
-       │  Client downloads & decrypts       │                               │
-       │  result with AES key              │                               │`}</pre>
-          </div>
-
-          {/* ── Encryption scheme ── */}
-          <h3 className="mt-10 text-base font-semibold text-white">Encryption scheme details</h3>
-          <div className="mt-4 overflow-x-auto rounded-xl border border-white/[0.08] bg-[#0c0c0d] p-5">
-            <pre className="text-[11px] leading-relaxed text-text-secondary font-mono">{`EphemeralKeyPair (client)        EphemeralKeyPair (agent)
-    ├── priv_key (32 bytes)           ├── priv_key (32 bytes)
-    ├── pub_key  (32 bytes)           ├── pub_key  (32 bytes)
-    │                                 │
-    └── ECDH(priv, agent_pub)  ──►  shared_secret (32 bytes)
-                                     └── HKDF-SHA256(salt, info="tenxo-aes-key")
-                                         └── aes_key (32 bytes)
-                                             └── AES-256-GCM encrypt(payload)
-
-Client sends to matchmaker:  xor_key = aes_key XOR ECDH(priv, agent_pub)
-Agent receives and recovers: aes_key = ECDH(agent_priv, client_pub) XOR xor_key
-Matchmaker observes:         xor_key and both pub_keys only
-
-Payload padding (prevents traffic analysis):
-  Tier S:  1 GB   padded size
-  Tier M:  5 GB   padded size
-  Tier L:  10 GB  padded size`}</pre>
-          </div>
-        </section>
 
         {/* ═══════════════════ API REFERENCE ═══════════════════════ */}
         <section id="api-reference" className="mt-16 scroll-mt-20">
