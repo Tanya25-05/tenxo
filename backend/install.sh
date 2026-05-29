@@ -4,12 +4,11 @@
 #   curl -fsSL https://tenxo-api.onrender.com/install.sh | bash -s -- --owner YOUR_USER_ID
 set -euo pipefail
 
-RELEASE_URL="https://github.com/Shailendra1703/tenxo-release/releases/download/latest/edge_agent-linux-amd64"
 BIN_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/tenxo"
 SERVICE_NAME="tenxo-agent"
 MATCHMAKER_URL="${MATCHMAKER_URL:-https://tenxo-api.onrender.com}"
-REPO_URL="https://github.com/Tanya25-05/tenxo.git"
+REPO_URL="https://github.com/Shailendra1703/tenxo-release"
 
 echo "============================================"
 echo " Tenxo Edge Agent Installer"
@@ -45,36 +44,32 @@ command -v docker &>/dev/null || {
   exit 1
 }
 
-# Need a downloader to fetch the prebuilt release binary
-if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
-  echo "ERROR: curl or wget is required to download the release binary."
+command -v cargo &>/dev/null || {
+  echo "ERROR: Rust/Cargo is required. Install:"
+  echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
   exit 1
-fi
+}
 
-# ── Get prebuilt binary from release URL ────────────────────────────────────
-echo "[1/4] Downloading edge agent release..."
-TMP_BIN="$(mktemp)"
-if command -v curl &>/dev/null; then
-  curl -fsSL "$RELEASE_URL" -o "$TMP_BIN" || {
-    echo "ERROR: Failed to download release from $RELEASE_URL"
-    rm -f "$TMP_BIN"
-    exit 1
-  }
-else
-  wget -qO "$TMP_BIN" "$RELEASE_URL" || {
-    echo "ERROR: Failed to download release from $RELEASE_URL"
-    rm -f "$TMP_BIN"
-    exit 1
-  }
-fi
-chmod +x "$TMP_BIN"
-echo "       Download complete"
+# ── Clone edge_agent only (sparse checkout) ────────────────────────────────
+BUILD_DIR="/tmp/tenxo-build"
+echo "[1/4] Building edge agent from source..."
+rm -rf "$BUILD_DIR"
+git clone --depth 1 --filter=blob:none --sparse "$REPO_URL" "$BUILD_DIR" 2>/dev/null || {
+  echo "ERROR: Failed to clone repository. Check your internet connection."
+  exit 1
+}
+cd "$BUILD_DIR"
+git sparse-checkout set edge_agent
+cd edge_agent
+cargo build --release 2>&1 | tail -5
+echo "       Build complete"
 
 # ── Install binary ─────────────────────────────────────────────────────────
 echo "[2/4] Installing binary..."
 sudo mkdir -p "$BIN_DIR"
-sudo install -m 0755 "$TMP_BIN" "$BIN_DIR/edge_agent"
-rm -f "$TMP_BIN"
+sudo cp "$BUILD_DIR/edge_agent/target/release/edge_agent" "$BIN_DIR/edge_agent"
+sudo chmod +x "$BIN_DIR/edge_agent"
+rm -rf "$BUILD_DIR"
 echo "       Installed $BIN_DIR/edge_agent"
 
 # ── Create config ──────────────────────────────────────────────────────────
