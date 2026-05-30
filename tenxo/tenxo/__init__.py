@@ -11,7 +11,7 @@ Security model:
   - The matchmaker routes only public keys and TEE quotes
   - The ECDH shared secret and AES payload key NEVER leave the client/agent
   - All workload data is encrypted end-to-end
-  - Payload size reveals only the tier (1/5/10 GB), not actual workload
+  - Payload size reveals only the tier (16 MB / 64 MB / 256 MB / 1 GB / 5 GB / 10 GB)
 """
 
 from .crypto import (
@@ -34,7 +34,7 @@ from .crypto import (
 
 from .pack import pack_workspace, check_requirements, load_ignore_patterns
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "generate_ephemeral_keypair",
     "EphemeralKeyPair",

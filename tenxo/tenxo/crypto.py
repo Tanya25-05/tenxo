@@ -13,7 +13,7 @@ Security Model:
   - Edge Agent broadcasts its ephemeral X25519 pubkey inside a TEE attestation quote
   - Go matchmaker routes pubkeys blindly (zero-knowledge)
   - Shared secret NEVER touches the matchmaker
-  - Payload is padded to standard tier sizes before upload
+  - Payload is padded to standard tier sizes (16 MB — 10 GB) before upload
 """
 
 from __future__ import annotations
@@ -44,10 +44,14 @@ SEED_SIZE = 32
 TAG_SIZE = 16
 
 # Plausible deniability: payload is padded to one of these sizes (in bytes)
+# Tiers are ordered from smallest to largest for efficient selection.
 PADDING_TIERS = [
-    1 * 1024 * 1024 * 1024,    # 1 GB
-    5 * 1024 * 1024 * 1024,    # 5 GB
-    10 * 1024 * 1024 * 1024,   # 10 GB
+    16 * 1024 * 1024,          # 16 MB   — lightweight scripts / inference
+    64 * 1024 * 1024,          # 64 MB   — small training jobs
+    256 * 1024 * 1024,         # 256 MB  — medium workloads
+    1 * 1024 * 1024 * 1024,    # 1 GB    — standard training
+    5 * 1024 * 1024 * 1024,    # 5 GB    — large datasets
+    10 * 1024 * 1024 * 1024,   # 10 GB   — heavy training / fine-tuning
 ]
 
 ENCRYPTED_OVERHEAD = NONCE_SIZE + TAG_SIZE  # 28 bytes overhead for AES-256-GCM

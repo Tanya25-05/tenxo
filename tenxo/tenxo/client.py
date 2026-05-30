@@ -87,12 +87,77 @@ def cmd_init(api_url: str, api_key: str | None = None):
     print(f"Saved config to {CONFIG_PATH}")
 
 
+def cmd_list(api_url: str | None = None, api_key: str | None = None):
+    """List available GPU nodes on the grid."""
+    cfg = _config()
+    api_url = api_url or cfg.get("api_url")
+    if not api_url:
+        print("No API URL configured. Run: tenxo init --api-url <url>")
+        sys.exit(1)
+
+    api_key = api_key or cfg.get("api_key")
+    headers = {}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    resp = requests.get(
+        f"{api_url.rstrip('/')}/nodes",
+        headers=headers,
+        timeout=10,
+    )
+    if resp.status_code == 401:
+        print("Unauthorized. Run: tenxo init --api-url <url> --api-key <jwt_or_key>")
+        sys.exit(1)
+    resp.raise_for_status()
+    nodes = resp.json().get("nodes", [])
+
+    if not nodes:
+        print("No GPU nodes currently online.")
+        return
+
+    # Aggregate by GPU model
+    sku_map: dict[str, list[dict]] = {}
+    for n in nodes:
+        model = n.get("gpu_model") or "Unknown"
+        sku_map.setdefault(model, []).append(n)
+
+    total_vram = sum(n.get("gpu_vram_mb", 0) for n in nodes)
+    idle = [n for n in nodes if n.get("status") == "idle"]
+
+    print(f"\n  Tenxo GPU Grid  —  {len(nodes)} node(s) online, {len(idle)} idle\n")
+    print(f"  {'GPU Model':<30} {'Count':>6} {'VRAM':>10} {'Status'}")
+    print(f"  {'─'*30} {'─'*6} {'─'*10} {'─'*10}")
+
+    for model in sorted(sku_map):
+        group = sku_map[model]
+        count = len(group)
+        vram_each = group[0].get("gpu_vram_mb", 0)
+        vram_total = sum(n.get("gpu_vram_mb", 0) for n in group)
+        idle_count = sum(1 for n in group if n.get("status") == "idle")
+        vram_str = (
+            f"{vram_each // 1024} GB" if vram_each else "?"
+        )
+        status = f"{idle_count}/{count} idle"
+        print(f"  {model:<30} {count:>6} {vram_str:>10} {status}")
+
+    print(f"\n  Total VRAM: {total_vram // 1024} GB")
+    print(f"\n  Use: tenxo run --gpu \"<GPU Model>\" ./workspace\n")
+
+
 # ─── Zero-Trust ECDH Key Exchange ──────────────────────────────────────────
 
-def perform_key_exchange(api_url: str, headers: dict) -> tuple[bytes, bytes, bytes]:
+def perform_key_exchange(
+    api_url: str, headers: dict, gpu_model: str | None = None
+) -> tuple[bytes, bytes, bytes]:
     """Perform ECDH key exchange via zero-knowledge signaling.
     
     The matchmaker routes public keys and TEE quotes without inspecting them.
+    
+    Args:
+        api_url: Backend API URL.
+        headers: Auth headers (X-API-Key or Authorization).
+        gpu_model: Optional GPU SKU filter (e.g. "NVIDIA RTX 4090", "A100").
+                   If None, picks the first available node.
     
     Returns:
         Tuple of (shared_secret: 32 bytes, client_pubkey: 32 bytes, agent_pubkey: 32 bytes).
@@ -110,6 +175,22 @@ def perform_key_exchange(api_url: str, headers: dict) -> tuple[bytes, bytes, byt
     if not nodes:
         print("No available GPU nodes found.")
         sys.exit(1)
+
+    # Filter by GPU SKU if requested
+    if gpu_model:
+        gpu_lower = gpu_model.lower()
+        filtered = [
+            n for n in nodes
+            if gpu_lower in (n.get("gpu_model") or "").lower()
+        ]
+        if not filtered:
+            available = ", ".join(
+                sorted(set(n.get("gpu_model", "?") for n in nodes))
+            )
+            print(f"No nodes matching GPU '{gpu_model}'. Available: {available}")
+            sys.exit(1)
+        nodes = filtered
+        print(f"Filtered to {len(nodes)} node(s) matching GPU '{gpu_model}'")
 
     # Pick the first online node
     node = nodes[0]
@@ -228,15 +309,12 @@ def perform_key_exchange(api_url: str, headers: dict) -> tuple[bytes, bytes, byt
 def _upload_with_progress(url: str, file_path: Path):
     total = file_path.stat().st_size
     with open(file_path, "rb") as f:
-        with _progress(total, "upload") as pbar:
-            def gen():
-                while True:
-                    chunk = f.read(64 * 1024)
-                    if not chunk:
-                        break
-                    pbar.update(len(chunk))
-                    yield chunk
-            resp = requests.put(url, data=gen())
+        data = f.read()
+    resp = requests.put(
+        url,
+        data=data,
+        headers={"Content-Length": str(total)},
+    )
     resp.raise_for_status()
     return resp
 
@@ -248,6 +326,7 @@ def cmd_run(
     api_url: str | None = None,
     api_key: str | None = None,
     timeout: int = 600,
+    gpu_model: str | None = None,
 ):
     cfg = _config()
     api_url = api_url or cfg.get("api_url")
@@ -274,7 +353,7 @@ def cmd_run(
 
         # ── Step 1: ECDH Key Exchange ──────────────────────────────────
         shared_secret, client_pubkey, agent_pubkey = perform_key_exchange(
-            api_url, headers
+            api_url, headers, gpu_model=gpu_model
         )
 
         # ── Step 2: HKDF Derive AES-256-GCM Key ───────────────────────

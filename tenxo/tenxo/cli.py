@@ -5,7 +5,7 @@ import sys
 
 from . import __version__
 from .pack import pack_workspace
-from .client import cmd_init, cmd_run
+from .client import cmd_init, cmd_run, cmd_list
 
 
 def main():
@@ -37,6 +37,11 @@ def main():
     init_p.add_argument("--api-url", required=True)
     init_p.add_argument("--api-key")
 
+    # list
+    list_p = sub.add_parser("list", help="List available GPU nodes on the grid")
+    list_p.add_argument("--api-url")
+    list_p.add_argument("--api-key")
+
     # run
     run_p = sub.add_parser(
         "run", help="Package, encrypt, upload, submit, and poll a job"
@@ -45,6 +50,11 @@ def main():
     run_p.add_argument("--api-url")
     run_p.add_argument("--api-key")
     run_p.add_argument("--timeout", type=int, default=600)
+    run_p.add_argument(
+        "--gpu",
+        dest="gpu_model",
+        help='GPU SKU filter (e.g. "NVIDIA RTX 4090", "A100", "A5000")',
+    )
 
     args = parser.parse_args()
 
@@ -52,8 +62,10 @@ def main():
         pack_workspace(args.directory, args.output)
     elif args.command == "init":
         cmd_init(args.api_url, args.api_key)
+    elif args.command == "list":
+        cmd_list(args.api_url, args.api_key)
     elif args.command == "run":
-        cmd_run(args.path, args.api_url, args.api_key, args.timeout)
+        cmd_run(args.path, args.api_url, args.api_key, args.timeout, args.gpu_model)
     else:
         parser.print_help()
         sys.exit(1)
