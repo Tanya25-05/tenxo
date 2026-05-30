@@ -212,88 +212,92 @@ def perform_key_exchange(
     client_keypair = EphemeralKeyPair.generate()
     client_pub_b64 = client_keypair.public_key_b64
 
-    # ── Step 3: Connect to signaling via WebSocket ──────────────────────
-    # We try WebSocket first (real-time), fall back to REST polling.
-    session = None
+    # ── Step 3: Discover agent's signaling session ────────────────────
+    session_id = None
     agent_pub_bytes = None
     shared_secret = None
 
-    if HAS_WS:
-        try:
-            with ws_client.connect(f"{ws_url}/signal/client?session={node_id}",
-                                    close_timeout=10) as ws:
-                # Receive TeeQuote from matchmaker (pushed by agent)
-                raw = ws.recv(timeout=15)
-                msg = json.loads(raw)
-                if msg.get("type") == "tee_quote":
-                    quote = TeeQuote.deserialize(json.loads(msg["payload"]))
-                elif msg.get("type") == "tee_quote":
-                    quote = TeeQuote.deserialize(msg["payload"])
-
-                # Verify the TEE quote
-                print("Verifying agent TEE attestation quote...")
-                report_data = quote.report_data
-                agent_pub_bytes = report_data[:32]
-
-                verify_tee_quote(quote, agent_pub_bytes)
-                print("TEE quote verified successfully")
-
-                # Compute ECDH shared secret (LOCAL ONLY)
-                shared_secret = compute_shared_secret(
-                    client_keypair.private_key, agent_pub_bytes
-                )
-
-                # Send our pubkey back
-                ws.send(json.dumps({
-                    "type": "client_pub_key",
-                    "payload": {"pub_key": client_pub_b64},
-                }))
-                print("Client pubkey sent via WebSocket signaling")
-
-        except Exception as e:
-            print(f"WebSocket signaling failed, falling back to REST: {e}")
-            HAS_WS_FALLBACK = False  # signal we already tried WS
-
-    # ── Step 4: REST fallback ───────────────────────────────────────────
-    if shared_secret is None:
-        # REST flow: list sessions, get TeeQuote, post client key
-        print("Falling back to REST signaling...")
-        sessions_resp = requests.get(
-            f"{api_url.rstrip('/')}/signal/session",
+    # Look up the active session for this node via the new endpoint
+    try:
+        sess_resp = requests.get(
+            f"{api_url.rstrip('/')}/signal/session-for-node",
+            params={"node_id": node_id},
             headers=headers,
             timeout=10,
         )
-        if sessions_resp.ok:
-            sessions_data = sessions_resp.json()
+        if sess_resp.ok:
+            sess_data = sess_resp.json()
+            session_id = sess_data.get("session_id")
+    except Exception:
+        pass
 
-        # Query the agent's session to get the TeeQuote
-        session_resp = requests.get(
-            f"{api_url.rstrip('/')}/signal/session?session={node_id}",
-            headers=headers,
-            timeout=10,
-        )
-        if session_resp.ok:
-            session_data = session_resp.json()
-            quote_data = session_data.get("quote")
-            if quote_data:
-                quote = TeeQuote.deserialize(quote_data)
-                report_data = quote.report_data
-                agent_pub_bytes = report_data[:32]
+    if session_id:
+        # ── Step 3a: WebSocket signaling with correct session UUID ────
+        if HAS_WS:
+            try:
+                with ws_client.connect(f"{ws_url}/signal/client?session={session_id}",
+                                        close_timeout=10) as ws:
+                    # Receive TeeQuote from matchmaker (pushed by agent)
+                    raw = ws.recv(timeout=15)
+                    msg = json.loads(raw)
+                    if msg.get("type") == "tee_quote":
+                        quote = TeeQuote.deserialize(json.loads(msg["payload"]))
+                    elif msg.get("type") == "tee_quote":
+                        quote = TeeQuote.deserialize(msg["payload"])
 
-                verify_tee_quote(quote, agent_pub_bytes)
-                print("TEE quote verified successfully (REST)")
+                    # Verify the TEE quote
+                    print("Verifying agent TEE attestation quote...")
+                    report_data = quote.report_data
+                    agent_pub_bytes = report_data[:32]
 
-                shared_secret = compute_shared_secret(
-                    client_keypair.private_key, agent_pub_bytes
-                )
+                    verify_tee_quote(quote, agent_pub_bytes)
+                    print("TEE quote verified successfully")
 
-                # Post our pubkey
-                key_resp = requests.post(
-                    f"{api_url.rstrip('/')}/signal/client-key?session={node_id}",
-                    headers=headers,
-                    json={"pub_key": client_pub_b64},
-                    timeout=10,
-                )
+                    # Compute ECDH shared secret (LOCAL ONLY)
+                    shared_secret = compute_shared_secret(
+                        client_keypair.private_key, agent_pub_bytes
+                    )
+
+                    # Send our pubkey back
+                    ws.send(json.dumps({
+                        "type": "client_pub_key",
+                        "payload": {"pub_key": client_pub_b64},
+                    }))
+                    print("Client pubkey sent via WebSocket signaling")
+
+            except Exception as e:
+                print(f"WebSocket signaling failed, falling back to REST: {e}")
+
+        # ── Step 3b: REST fallback with correct session UUID ──────────
+        if shared_secret is None:
+            print("Falling back to REST signaling...")
+            session_resp = requests.get(
+                f"{api_url.rstrip('/')}/signal/session?session={session_id}",
+                headers=headers,
+                timeout=10,
+            )
+            if session_resp.ok:
+                session_data = session_resp.json()
+                quote_data = session_data.get("quote")
+                if quote_data:
+                    quote = TeeQuote.deserialize(quote_data)
+                    report_data = quote.report_data
+                    agent_pub_bytes = report_data[:32]
+
+                    verify_tee_quote(quote, agent_pub_bytes)
+                    print("TEE quote verified successfully (REST)")
+
+                    shared_secret = compute_shared_secret(
+                        client_keypair.private_key, agent_pub_bytes
+                    )
+
+                    # Post our pubkey
+                    key_resp = requests.post(
+                        f"{api_url.rstrip('/')}/signal/client-key?session={session_id}",
+                        headers=headers,
+                        json={"pub_key": client_pub_b64},
+                        timeout=10,
+                    )
 
     # ── Step 5: Fallback if all signaling fails ─────────────────────────
     if shared_secret is None:

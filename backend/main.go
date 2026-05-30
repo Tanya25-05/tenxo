@@ -889,6 +889,7 @@ func RegisterSignalingRoutes(mux *http.ServeMux) {
 		}
 	})))
 	mux.HandleFunc("/signal/client-key", cors(RateLimit(signalRateLimiter, signalStore.HandlePostClientKey)))
+	mux.HandleFunc("/signal/session-for-node", cors(RateLimit(signalRateLimiter, signalStore.HandleGetSessionByNode)))
 
 	log.Println("signaling: zero-knowledge ECDH routes registered (rate-limited: 30 req/min)")
 }

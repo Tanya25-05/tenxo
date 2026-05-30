@@ -195,6 +195,7 @@ fn encrypt_payload(plaintext: &[u8], aes_key: &[u8; AEAD_KEY_SIZE]) -> Result<Ve
 fn perform_key_exchange(
     matchmaker_url: &str,
     agent_keys: AgentKeys,
+    node_id: &str,
 ) -> Result<(Vec<u8>, WebSocket<MaybeTlsStream<TcpStream>>)> {
     let ws_url = matchmaker_url
         .replace("http://", "ws://")
@@ -258,6 +259,14 @@ fn perform_key_exchange(
         .context("missing session_id in response")?
         .to_string();
     println!("Session created via WebSocket: {}", session_id);
+
+    // ── Step 5b: Register node_id with matchmaker ────────────────────
+    let register_msg = serde_json::json!({
+        "type": "register",
+        "payload": { "node_id": node_id }
+    });
+    ws.send(Message::Text(serde_json::to_string(&register_msg)?))
+        .context("failed to send register")?;
 
     // ── Step 6: Wait for client_pub_key message ───────────────────────
     let client_pubkey = loop {
@@ -768,6 +777,7 @@ fn main() -> Result<()> {
     let (shared_secret, mut ws) = perform_key_exchange(
         &matchmaker_url,
         agent_keys,
+        &node_id,
     )?;
     println!("ECDH shared secret computed (matchmaker never saw it)");
 
