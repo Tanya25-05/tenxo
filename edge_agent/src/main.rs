@@ -510,6 +510,7 @@ fn main() -> Result<()> {
     println!("Tenxo Edge Agent starting...");
     println!("  Node ID:    {}", node_id);
     println!("  Matchmaker: {}", matchmaker_url);
+    println!("  Owner:      {}", if owner.is_empty() { "(none)" } else { &owner });
 
     // ── Query GPU info early (before key exchange) ─────────────────
     let (gpu_model, gpu_vram_mb) = query_gpu_info();
