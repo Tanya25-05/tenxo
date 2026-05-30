@@ -149,6 +149,7 @@ func main() {
 	go srv.listenHeartbeats(context.Background())
 	go srv.subscribeResults()
 	go srv.reapStaleJobs(context.Background())
+	go srv.reapStaleNodes(context.Background())
 
 	// Public endpoints (no auth required)
 	http.HandleFunc("/health", cors(handleHealth))
@@ -339,8 +340,7 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		hb.Status = "idle"
 	}
 	if hb.Owner == "" {
-		http.Error(w, "owner required", http.StatusBadRequest)
-		return
+		hb.Owner = "unknown"
 	}
 
 	ctx := r.Context()
@@ -1241,6 +1241,20 @@ func (s *Server) subscribeResults() {
 		return
 	}
 	log.Printf("subscribed to jobs.results (%v)", sub)
+}
+
+// reapStaleNodes periodically removes nodes that haven't sent a heartbeat recently.
+func (s *Server) reapStaleNodes(ctx context.Context) {
+	ticker := time.NewTicker(90 * time.Second)
+	defer ticker.Stop()
+
+	const maxAge = 120 * time.Second
+
+	for range ticker.C {
+		if err := s.st.ReapStaleNodes(ctx, maxAge); err != nil {
+			log.Printf("node reaper: failed to reap stale nodes: %v", err)
+		}
+	}
 }
 
 // reapStaleJobs periodically marks jobs stuck in queued/created/running as failed.

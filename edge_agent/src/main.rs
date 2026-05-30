@@ -511,38 +511,14 @@ fn main() -> Result<()> {
     println!("  Node ID:    {}", node_id);
     println!("  Matchmaker: {}", matchmaker_url);
 
+    // ── Query GPU info early (before key exchange) ─────────────────
+    let (gpu_model, gpu_vram_mb) = query_gpu_info();
+    println!("Detected GPU: {} ({} MB VRAM)", gpu_model, gpu_vram_mb);
+
     let client = Client::builder()
         .timeout(Duration::from_secs(3600))
         .build()
         .context("failed to create HTTP client")?;
-
-    // ── Generate ephemeral X25519 keypair ────────────────────────────
-    let agent_keys = AgentKeys::generate();
-    println!("Ephemeral X25519 keypair generated");
-
-    // ── ECDH Key Exchange + acquire persistent WebSocket bridge ──────
-    let (shared_secret, mut ws) = perform_key_exchange(
-        &matchmaker_url,
-        agent_keys,
-    )?;
-    println!("ECDH shared secret computed (matchmaker never saw it)");
-
-    // ── Query GPU info ──────────────────────────────────────────────
-    let (gpu_model, gpu_vram_mb) = query_gpu_info();
-    println!("Detected GPU: {} ({} MB VRAM)", gpu_model, gpu_vram_mb);
-
-    // ── Register with matchmaker bridge ────────────────────────────
-    let reg_msg = serde_json::json!({
-        "type": "heartbeat",
-        "payload": {
-            "node_id": node_id,
-            "status": "idle",
-            "owner": owner,
-            "gpu_model": gpu_model,
-            "gpu_vram_mb": gpu_vram_mb,
-        }
-    });
-    ws.send(Message::Text(serde_json::to_string(&reg_msg)?))?;
 
     // ── Shutdown flag ──────────────────────────────────────────────
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -553,7 +529,7 @@ fn main() -> Result<()> {
     })
     .context("failed to set Ctrl-C handler")?;
 
-    // ── Spawn heartbeat publisher (HTTP POST, no NATS needed) ──────
+    // ── Spawn heartbeat publisher immediately (HTTP POST) ──────────
     let hb_client = client.clone();
     let hb_url = format!("{}/agent/heartbeat", matchmaker_url);
     let hb_node = node_id.clone();
@@ -575,6 +551,30 @@ fn main() -> Result<()> {
             std::thread::sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
         }
     });
+
+    // ── Generate ephemeral X25519 keypair ────────────────────────────
+    let agent_keys = AgentKeys::generate();
+    println!("Ephemeral X25519 keypair generated");
+
+    // ── ECDH Key Exchange + acquire persistent WebSocket bridge ──────
+    let (shared_secret, mut ws) = perform_key_exchange(
+        &matchmaker_url,
+        agent_keys,
+    )?;
+    println!("ECDH shared secret computed (matchmaker never saw it)");
+
+    // ── Register with matchmaker bridge ────────────────────────────
+    let reg_msg = serde_json::json!({
+        "type": "heartbeat",
+        "payload": {
+            "node_id": node_id,
+            "status": "idle",
+            "owner": owner,
+            "gpu_model": gpu_model,
+            "gpu_vram_mb": gpu_vram_mb,
+        }
+    });
+    ws.send(Message::Text(serde_json::to_string(&reg_msg)?))?;
 
     // ── Job processing loop via WebSocket bridge ─────────────────────
     while !shutdown.load(Ordering::SeqCst) {
