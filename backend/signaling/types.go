@@ -343,7 +343,6 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 				nodeID = hb.NodeID
 				ensureSubscribed()
 			}
-			ss.nc.Publish("heartbeats."+nodeID, wsMsg.Payload)
 		case "result":
 			ss.nc.Publish("jobs.results", wsMsg.Payload)
 		default:
