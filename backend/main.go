@@ -506,7 +506,7 @@ func ensureStream(js nats.JetStreamContext, name string) error {
 	if err == nats.ErrStreamNotFound {
 		_, err = js.AddStream(&nats.StreamConfig{
 			Name:      name,
-			Subjects:  []string{"jobs"},
+			Subjects:  []string{"jobs.>"},
 			Storage:   nats.FileStorage,
 			Retention: nats.WorkQueuePolicy,
 		})
