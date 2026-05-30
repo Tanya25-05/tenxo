@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Check,
+  Copy,
   Cpu,
   FlaskConical,
   Gauge,
@@ -12,6 +14,8 @@ import {
   Server,
   Shield,
   ShoppingCart,
+  Terminal,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -57,7 +61,8 @@ export default function MarketplacePage() {
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [nodes, setNodes] = useState<GpuNode[]>([]);
   const [loading, setLoading] = useState(true);
-  const [deployingId, setDeployingId] = useState<string | null>(null);
+  const [selectedNode, setSelectedNode] = useState<GpuNode | null>(null);
+  const [copied, setCopied] = useState(false);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState("");
@@ -132,7 +137,6 @@ export default function MarketplacePage() {
         }).catch(() => {});
       }
     }
-    setDeployingId(null);
   }, [toast]);
 
   const { status: wsStatus } = useNatsSocket({
@@ -157,29 +161,20 @@ export default function MarketplacePage() {
       toast("Sign in to deploy", "error");
       return;
     }
-    setDeployingId(node.node_id);
-
-    try {
-      const res = await fetch(`${API_URL}/jobs`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          job_link: `tenxo://deploy?node=${node.node_id}&gpu=${node.gpu_model}`,
-        }),
-      });
-
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      trackUsage(data.job_id, "start");
-      toast(`Deploying on ${node.gpu_model} — ${data.status}`, "info");
-    } catch (e: any) {
-      toast(`Deploy failed: ${e.message}`, "error");
-      setDeployingId(null);
-    }
+    setSelectedNode(node);
+    setCopied(false);
   };
+
+  const copyCommand = () => {
+    if (!selectedNode) return;
+    const cmd = `tenxo run /path/to/workspace --node-id ${selectedNode.node_id}`;
+    navigator.clipboard.writeText(cmd).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const closeDialog = () => setSelectedNode(null);
 
   const toggleFilter = (field: string[], value: string, setter: (v: string[]) => void) => {
     setter(field.includes(value) ? field.filter((f) => f !== value) : [...field, value]);
@@ -382,17 +377,127 @@ export default function MarketplacePage() {
                   variant="primary"
                   size="md"
                   className="mt-auto w-full"
-                  loading={deployingId === node.node_id}
-                  disabled={deployingId === node.node_id}
                   onClick={() => handleDeploy(node)}
                 >
-                  {deployingId === node.node_id ? "Deploying..." : "Deploy"}
+                  Deploy
                 </Button>
               </Card>
             ))}
           </div>
         )}
       </div>
+
+      {/* ─── CLI Deploy Dialog ─── */}
+      {selectedNode && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl border border-white/[0.08] bg-[#0c0c0f] p-6 shadow-2xl">
+            <div className="mb-5 flex items-start justify-between">
+              <div>
+                <div className="flex items-center gap-2 text-accent-purple">
+                  <Terminal className="size-4" />
+                  <p className="text-[10px] font-semibold uppercase tracking-widest">
+                    CLI Deploy
+                  </p>
+                </div>
+                <h2 className="mt-2 text-base font-semibold text-text-primary">
+                  {selectedNode.gpu_model}
+                </h2>
+                <p className="mt-0.5 font-mono text-[11px] text-text-tertiary">
+                  {selectedNode.node_id}
+                </p>
+              </div>
+              <button
+                onClick={closeDialog}
+                className="rounded-lg p-1.5 text-text-tertiary hover:bg-white/[0.06] hover:text-text-primary"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <div className="mb-5 space-y-3">
+              <p className="text-[12px] text-text-secondary">
+                Deploy from your terminal using the Tenxo CLI. The encrypted workspace
+                is end-to-end encrypted — no one but you and the GPU agent can read it.
+              </p>
+
+              <div className="space-y-2">
+                <p className="text-[11px] font-medium text-text-tertiary">1. Install the CLI</p>
+                <div className="flex items-center justify-between rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2">
+                  <code className="font-mono text-[13px] text-text-primary">pip install tenxo</code>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText("pip install tenxo");
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 2000);
+                    }}
+                    className="rounded-md p-1 text-text-tertiary hover:bg-white/[0.06] hover:text-text-primary"
+                  >
+                    {copied ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-[11px] font-medium text-text-tertiary">2. Configure API</p>
+                <div className="flex items-center justify-between rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2">
+                  <code className="break-all font-mono text-[12px] text-text-primary">
+                    tenxo init --api-url https://tenxo-api.onrender.com
+                  </code>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText("tenxo init --api-url https://tenxo-api.onrender.com");
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 2000);
+                    }}
+                    className="ml-2 shrink-0 rounded-md p-1 text-text-tertiary hover:bg-white/[0.06] hover:text-text-primary"
+                  >
+                    {copied ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-text-tertiary">
+                  Add <code className="rounded bg-white/[0.06] px-1 font-mono">--api-key</code> from the{" "}
+                  <a href="/developer" className="text-accent-purple underline hover:no-underline">
+                    Developer Console
+                  </a>{" "}
+                  if required.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-[11px] font-medium text-text-tertiary">3. Run your job</p>
+                <div className="flex items-center justify-between rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2">
+                  <code className="break-all font-mono text-[12px] text-text-primary">
+                    tenxo run /path/to/workspace --node-id {selectedNode.node_id}
+                  </code>
+                  <button
+                    onClick={copyCommand}
+                    className="ml-2 shrink-0 rounded-md p-1 text-text-tertiary hover:bg-white/[0.06] hover:text-text-primary"
+                  >
+                    {copied ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <Button variant="secondary" size="sm" className="flex-1" onClick={closeDialog}>
+                Close
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                className="flex-1"
+                onClick={() => {
+                  copyCommand();
+                  closeDialog();
+                }}
+              >
+                Copy &amp; Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

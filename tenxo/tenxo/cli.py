@@ -55,6 +55,10 @@ def main():
         dest="gpu_model",
         help='GPU SKU filter (e.g. "NVIDIA RTX 4090", "A100", "A5000")',
     )
+    run_p.add_argument(
+        "--node-id",
+        help="Specific node ID to deploy on (overrides --gpu filter)",
+    )
 
     args = parser.parse_args()
 
@@ -65,7 +69,7 @@ def main():
     elif args.command == "list":
         cmd_list(args.api_url, args.api_key)
     elif args.command == "run":
-        cmd_run(args.path, args.api_url, args.api_key, args.timeout, args.gpu_model)
+        cmd_run(args.path, args.api_url, args.api_key, args.timeout, args.gpu_model, args.node_id)
     else:
         parser.print_help()
         sys.exit(1)

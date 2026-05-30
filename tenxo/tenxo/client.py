@@ -148,8 +148,8 @@ def cmd_list(api_url: str | None = None, api_key: str | None = None):
 # ─── Zero-Trust ECDH Key Exchange ──────────────────────────────────────────
 
 def perform_key_exchange(
-    api_url: str, headers: dict, gpu_model: str | None = None
-) -> tuple[bytes, bytes, bytes]:
+    api_url: str, headers: dict, gpu_model: str | None = None, node_id: str | None = None
+) -> tuple[bytes, bytes, bytes, str]:
     """Perform ECDH key exchange via zero-knowledge signaling.
     
     The matchmaker routes public keys and TEE quotes without inspecting them.
@@ -159,9 +159,10 @@ def perform_key_exchange(
         headers: Auth headers (X-API-Key or Authorization).
         gpu_model: Optional GPU SKU filter (e.g. "NVIDIA RTX 4090", "A100").
                    If None, picks the first available node.
+        node_id: Specific node ID to deploy on (overrides gpu_model filter).
     
     Returns:
-        Tuple of (shared_secret: 32 bytes, client_pubkey: 32 bytes, agent_pubkey: 32 bytes).
+        Tuple of (shared_secret: 32 bytes, client_pubkey: 32 bytes, agent_pubkey: 32 bytes, node_id: str).
     """
     ws_url = api_url.rstrip('/').replace("http://", "ws://").replace("https://", "wss://")
 
@@ -177,26 +178,35 @@ def perform_key_exchange(
         print("No available GPU nodes found.")
         sys.exit(1)
 
-    # Filter by GPU SKU if requested
-    if gpu_model:
-        gpu_lower = gpu_model.lower()
-        filtered = [
-            n for n in nodes
-            if gpu_lower in (n.get("gpu_model") or "").lower()
-        ]
-        if not filtered:
-            available = ", ".join(
-                sorted(set(n.get("gpu_model", "?") for n in nodes))
-            )
-            print(f"No nodes matching GPU '{gpu_model}'. Available: {available}")
+    # If a specific node_id is given, find it directly
+    if node_id:
+        node = next((n for n in nodes if n.get("node_id") == node_id), None)
+        if not node:
+            print(f"Node '{node_id}' not found or offline.")
             sys.exit(1)
-        nodes = filtered
-        print(f"Filtered to {len(nodes)} node(s) matching GPU '{gpu_model}'")
+        print(f"Selected GPU node: {node_id} ({node.get('gpu_model', '?')})")
+    else:
+        # Filter by GPU SKU if requested
+        if gpu_model:
+            gpu_lower = gpu_model.lower()
+            filtered = [
+                n for n in nodes
+                if gpu_lower in (n.get("gpu_model") or "").lower()
+            ]
+            if not filtered:
+                available = ", ".join(
+                    sorted(set(n.get("gpu_model", "?") for n in nodes))
+                )
+                print(f"No nodes matching GPU '{gpu_model}'. Available: {available}")
+                sys.exit(1)
+            nodes = filtered
+            print(f"Filtered to {len(nodes)} node(s) matching GPU '{gpu_model}'")
 
-    # Pick the first online node
-    node = nodes[0]
+        # Pick the first online node
+        node = nodes[0]
+
     node_id = node.get("node_id")
-    print(f"Selected GPU node: {node_id}")
+    print(f"Established session with node: {node_id}")
 
     # ── Step 2: Generate Client ephemeral X25519 keypair ────────────────
     client_keypair = EphemeralKeyPair.generate()
@@ -298,7 +308,7 @@ def perform_key_exchange(
     assert shared_secret is not None
 
     print("ECDH key exchange complete (matchmaker never saw shared secret)")
-    return shared_secret, client_keypair.public_key_bytes, agent_pub_bytes
+    return shared_secret, client_keypair.public_key_bytes, agent_pub_bytes, node_id
 
 
 # ─── Upload with Progress ──────────────────────────────────────────────────
@@ -324,6 +334,7 @@ def cmd_run(
     api_key: str | None = None,
     timeout: int = 600,
     gpu_model: str | None = None,
+    node_id: str | None = None,
 ):
     cfg = _config()
     api_url = api_url or cfg.get("api_url")
@@ -349,8 +360,8 @@ def cmd_run(
         zip_path = pack_workspace(root, td_path / "workspace.zip")
 
         # ── Step 1: ECDH Key Exchange ──────────────────────────────────
-        shared_secret, client_pubkey, agent_pubkey = perform_key_exchange(
-            api_url, headers, gpu_model=gpu_model
+        shared_secret, client_pubkey, agent_pubkey, node_id = perform_key_exchange(
+            api_url, headers, gpu_model=gpu_model, node_id=node_id
         )
 
         # ── Step 2: HKDF Derive AES-256-GCM Key ───────────────────────
@@ -413,6 +424,7 @@ def cmd_run(
             "salt_b64": salt_b64,
             # Include client pubkey so agent can verify the ECDH derivation
             "client_pub_key": __import__("base64").b64encode(client_pubkey).decode(),
+            "node_id": node_id,
         }
         print("Submitting job (zero-knowledge — AES key never sent)...")
         resp = requests.post(

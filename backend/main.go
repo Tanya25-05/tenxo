@@ -62,6 +62,7 @@ type JobRequest struct {
 	EncKeyB64               string `json:"enc_key_b64"`
 	SaltB64                 string `json:"salt_b64"`
 	GPUModel                string `json:"gpu_model"`
+	NodeID                  string `json:"node_id"`
 	WorkspaceID             string `json:"workspace_id,omitempty"`
 	EncryptedWorkspaceKeyB64 string `json:"encrypted_workspace_key_b64,omitempty"`
 }
@@ -467,7 +468,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func cors(next http.HandlerFunc) http.HandlerFunc {
-	allowedOrigins := getEnv("ALLOWED_ORIGINS", "https://tenxo.onrender.com")
+	allowedOrigins := getEnv("ALLOWED_ORIGINS", "https://tenxer.onrender.com")
 	origins := strings.Split(allowedOrigins, ",")
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -697,7 +698,11 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = s.js.Publish("jobs", msgData)
+	subject := "jobs"
+	if payload.NodeID != "" {
+		subject = "jobs." + payload.NodeID
+	}
+	_, err = s.js.Publish(subject, msgData)
 	if err != nil {
 		http.Error(w, "failed to enqueue job", http.StatusInternalServerError)
 		return
@@ -705,7 +710,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "queued", "job_id": jobID, "subject": "jobs"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "queued", "job_id": jobID, "subject": subject})
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
@@ -860,7 +865,7 @@ var signalStore *signaling.SessionStore
 var signalRateLimiter *RateLimiter
 
 func initSignaling() {
-	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxo.onrender.com")
+	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxer.onrender.com")
 	signalStore = signaling.NewSessionStore(allowedOrigin)
 	// 30 session creation requests per minute per IP
 	signalRateLimiter = NewRateLimiter(30, time.Minute)
@@ -904,6 +909,9 @@ func (s *Server) listenHeartbeats(ctx context.Context) {
 		}
 		if hb.Status == "" {
 			hb.Status = "idle"
+		}
+		if hb.Owner == "" {
+			hb.Owner = "unknown"
 		}
 
 		if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner, hb.GPUModel, hb.GPUVRAMMB); err != nil {
@@ -1460,7 +1468,7 @@ func (s *Server) sendWS(userID, payload string) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxo.onrender.com")
+	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxer.onrender.com")
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")

@@ -291,20 +291,35 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nodeID := sessionID
+	nodeID := ""
+	var sub *nats.Subscription
+	subscribed := false
 
-	sub, err := ss.nc.Subscribe("jobs", func(m *nats.Msg) {
-		if err := conn.WriteMessage(websocket.TextMessage, m.Data); err != nil {
-			log.Printf("signaling: write job to WS failed (%s): %v", sessionID, err)
+	ensureSubscribed := func() {
+		if subscribed || nodeID == "" {
+			return
 		}
-	})
-	if err != nil {
-		log.Printf("signaling: subscribe jobs failed (%s): %v", sessionID, err)
-		return
+		var err error
+		sub, err = ss.nc.Subscribe("jobs."+nodeID, func(m *nats.Msg) {
+			if err := conn.WriteMessage(websocket.TextMessage, m.Data); err != nil {
+				log.Printf("signaling: write job to WS failed (%s): %v", nodeID, err)
+			}
+		})
+		if err != nil {
+			log.Printf("signaling: subscribe jobs failed (%s): %v", nodeID, err)
+			return
+		}
+		subscribed = true
+		log.Printf("signaling: agent %s subscribed to jobs.%s", sessionID, nodeID)
 	}
-	defer sub.Unsubscribe()
 
 	log.Printf("signaling: agent %s entering bridge mode", sessionID)
+
+	defer func() {
+		if sub != nil {
+			sub.Unsubscribe()
+		}
+	}()
 
 	for {
 		_, raw, err := conn.ReadMessage()
@@ -326,6 +341,7 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := json.Unmarshal(wsMsg.Payload, &hb); err == nil && hb.NodeID != "" {
 				nodeID = hb.NodeID
+				ensureSubscribed()
 			}
 			ss.nc.Publish("heartbeats."+nodeID, wsMsg.Payload)
 		case "result":

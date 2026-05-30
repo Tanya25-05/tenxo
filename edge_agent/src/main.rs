@@ -771,19 +771,6 @@ fn main() -> Result<()> {
     )?;
     println!("ECDH shared secret computed (matchmaker never saw it)");
 
-    // ── Register with matchmaker bridge ────────────────────────────
-    let reg_msg = serde_json::json!({
-        "type": "heartbeat",
-        "payload": {
-            "node_id": node_id,
-            "status": "idle",
-            "owner": owner,
-            "gpu_model": gpu_model,
-            "gpu_vram_mb": gpu_vram_mb,
-        }
-    });
-    ws.send(Message::Text(serde_json::to_string(&reg_msg)?))?;
-
     // ── Job processing loop via WebSocket bridge ─────────────────────
     while !shutdown.load(Ordering::SeqCst) {
         let msg = match ws.read() {
