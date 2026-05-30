@@ -19,13 +19,14 @@ Security Model:
 from __future__ import annotations
 
 import base64
+import hmac
 import os
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, Optional
 
-from cryptography.hazmat.primitives import hashes, hmac
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
