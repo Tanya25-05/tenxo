@@ -491,6 +491,69 @@ func (s *PGStore) UsageStop(ctx context.Context, userID, jobID string) (elapsed 
 	return
 }
 
+func (s *PGStore) WorkspaceSet(ctx context.Context, workspaceID string, fields map[string]string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO workspaces (workspace_id, owner, upload_url, enc_key_b64, overlay_url, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, NOW())
+		 ON CONFLICT (workspace_id) DO UPDATE SET
+		   owner=COALESCE(NULLIF($2,''), workspaces.owner),
+		   upload_url=COALESCE(NULLIF($3,''), workspaces.upload_url),
+		   enc_key_b64=COALESCE(NULLIF($4,''), workspaces.enc_key_b64),
+		   overlay_url=COALESCE(NULLIF($5,''), workspaces.overlay_url),
+		   updated_at=NOW()`,
+		workspaceID,
+		fields["owner"],
+		fields["upload_url"],
+		fields["enc_key_b64"],
+		fields["overlay_url"],
+	)
+	return err
+}
+
+func (s *PGStore) WorkspaceGet(ctx context.Context, workspaceID string) (map[string]string, error) {
+	var owner, uploadURL, encKeyB64, overlayURL string
+	err := s.pool.QueryRow(ctx,
+		`SELECT owner, upload_url, enc_key_b64, overlay_url
+		 FROM workspaces WHERE workspace_id=$1`,
+		workspaceID).Scan(&owner, &uploadURL, &encKeyB64, &overlayURL)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		"owner":       owner,
+		"upload_url":  uploadURL,
+		"enc_key_b64": encKeyB64,
+		"overlay_url": overlayURL,
+	}, nil
+}
+
+func (s *PGStore) ListWorkspacesByOwner(ctx context.Context, owner string, limit int) ([]WorkspaceInfo, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT workspace_id, owner, upload_url, overlay_url, created_at, updated_at
+		 FROM workspaces
+		 WHERE owner=$1
+		 ORDER BY updated_at DESC
+		 LIMIT $2`,
+		owner, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	workspaces := make([]WorkspaceInfo, 0)
+	for rows.Next() {
+		var w WorkspaceInfo
+		if err := rows.Scan(&w.WorkspaceID, &w.Owner, &w.UploadURL, &w.OverlayURL, &w.CreatedAt, &w.UpdatedAt); err != nil {
+			return nil, err
+		}
+		workspaces = append(workspaces, w)
+	}
+	return workspaces, rows.Err()
+}
+
 func (s *PGStore) ReapStaleJobs(ctx context.Context, maxAge time.Duration) ([]string, error) {
 	rows, err := s.pool.Query(ctx,
 		`UPDATE jobs

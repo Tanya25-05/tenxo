@@ -1,0 +1,169 @@
+# docker-compose.tee.yml
+# Confidential GPU container orchestration for untrusted nodes.
+#
+# Hardware requirements:
+#   - AMD EPYC with SEV-SNP (or Intel Xeon with SGX/TDX)
+#   - NVIDIA Hopper (H100) or Blackwell (B200) GPU
+#   - nvidia-container-toolkit with confidential-compute support
+#   - dm-crypt / cryptsetup for LUKS ephemeral storage
+#
+# Usage:
+#   export REGISTRY_TOKEN=$(cat /etc/tenxo/registry-token)
+#   docker compose -f docker-compose.tee.yml up
+#   docker compose -f docker-compose.tee.yml down -v
+
+services:
+  # ─── Encrypted Storage Bootstrapper ──────────────────────────────────
+  storage-init:
+    image: alpine:3.19
+    container_name: tenxo-storage-init
+    network_mode: none
+    privileged: true
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - |
+        apk add --no-cache cryptsetup util-linux curl e2fsprogs >/dev/null 2>&1
+        exec /host/setup/encrypted-storage-setup.sh
+    environment:
+      KMS_ENDPOINT:      "${KMS_ENDPOINT:-https://kms.tenxo.internal/v1/keys}"
+      KMS_TOKEN:         "${KMS_TOKEN:-}"
+      STORAGE_SIZE_GB:   "${STORAGE_SIZE_GB:-64}"
+      TARGET_DEVICE:     "${TARGET_DEVICE:-}"
+      MOUNTPOINT:        /mnt/ephemeral_workspace
+    volumes:
+      - /dev:/dev:slave
+      - /sys:/sys:ro
+      - /lib/modules:/lib/modules:ro
+      - ./confidential:/host/setup:ro
+    tmpfs:
+      - /tmp:noexec,nosuid,size=128M
+      - /run:noexec,nosuid,size=64M
+    restart: "no"
+
+  # ─── Edge Agent (Confidential Compute) ───────────────────────────────
+  edge-agent:
+    image: ghcr.io/tenxo/edge-agent:latest
+    container_name: tenxo-edge-agent
+    pull_policy: always
+    restart: unless-stopped
+    network_mode: bridge
+    stop_grace_period: 120s
+    stop_signal: SIGTERM
+
+    secrets:
+      - regcred
+
+    environment:
+      NODE_ID:                     "${NODE_ID:-tenxo-node-$(hostname)}"
+      MATCHMAKER_URL:              "${MATCHMAKER_URL:-http://matchmaker.tenxo.internal:8080}"
+      OWNER:                       "${OWNER:-}"
+      # AMD SEV-SNP TEE
+      SEV_SNP_ENABLED:             "1"
+      KVM_AMD_SEV:                 "1"
+      MEM_ENCRYPT:                 "on"
+      SEV_GUEST:                   "1"
+      # Intel SGX / TDX (fallback)
+      SGX_ENABLED:                 "${SGX_ENABLED:-0}"
+      TDX_ENABLED:                 "${TDX_ENABLED:-0}"
+      AESMD:                       "1"
+      # NVIDIA Confidential Computing — PCIe lane encryption
+      NVIDIA_CONFIDENTIAL_COMPUTING: "1"
+      NVIDIA_DRIVER_CAPABILITIES:    "compute,utility,graphics,video"
+      NVIDIA_REQUIRE_CUDA:           "cuda>=12.4"
+      NVIDIA_VISIBLE_DEVICES:        "all"
+      NVIDIA_DISABLE_REQUIRE:        "0"
+      # Workspace
+      WORKSPACE_PATH:              /mnt/ephemeral_workspace/workspace
+      SCRATCH_PATH:                /mnt/ephemeral_workspace/scratch
+
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - label=disable
+    cap_add:
+      - SYS_PTRACE
+      - IPC_LOCK
+    cap_drop:
+      - ALL
+
+    volumes:
+      - ephemeral_workspace:/mnt/ephemeral_workspace
+      - /dev:/dev:slave
+      - /usr/local/nvidia:/usr/local/nvidia:ro
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /etc/nvidia-container-runtime/config.toml:/etc/nvidia-container-runtime/config.toml:ro
+      - ./confidential/teardown-wipe.sh:/teardown-wipe.sh:ro
+
+    tmpfs:
+      - /tmp:noexec,nosuid,size=4G
+      - /var/run:noexec,nosuid,size=128M
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, nvidia.com/confidential-compute]
+        limits:
+          cpus: "16"
+          memory: 128G
+
+    healthcheck:
+      test: ["CMD", "/edge-agent", "--health-check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    entrypoint: []
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cleanup() {
+          echo "[edge-agent] Triggering teardown..."
+          /teardown-wipe.sh \
+            --container-id "$(hostname)" \
+            --luks-name "tenxo-$(hostname)"
+          echo "[edge-agent] Teardown complete"
+        }
+        trap cleanup EXIT
+        exec /edge-agent
+
+  # ─── NVIDIA Confidential Compute Sidecar ──────────────────────────────
+  nvidia-cc:
+    image: nvidia/cc-manager:latest
+    container_name: tenxo-nvidia-cc
+    pull_policy: if_not_present
+    network_mode: none
+    privileged: true
+    environment:
+      CC_MODE: "confidential"
+      GPU_RESET_ON_EXIT: "true"
+    volumes:
+      - /dev:/dev:slave
+      - /usr/local/nvidia:/usr/local/nvidia:ro
+      - /sys:/sys:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  ephemeral_workspace:
+    driver: local
+    driver_opts:
+      type: none
+      device: /mnt/ephemeral_workspace
+      o: bind
+
+secrets:
+  regcred:
+    file: /etc/tenxo/registry-token

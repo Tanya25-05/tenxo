@@ -1,0 +1,297 @@
+# kubernetes-pod.yaml
+# Confidential GPU Pod specification for untrusted nodes.
+#
+# Enforces:
+#   - AMD SEV-SNP / Intel TDX confidential computing via pod-level runtime class
+#   - NVIDIA Confidential Computing (Hopper/Blackwell) — PCIe encryption
+#   - Private registry auth via imagePullSecrets (encrypted in etcd)
+#   - Ephemeral encrypted storage with tmpfs / emptyDir (no hostPath)
+#   - No hostNetwork, no privileged escalation
+#
+# Deploy:
+#   kubectl create secret docker-registry regcred \
+#       --docker-server=https://ghcr.io \
+#       --docker-username=<user> \
+#       --docker-password=<pat> \
+#       --namespace=tenxo
+#
+#   kubectl apply -f kubernetes-pod.yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tenxo-edge-agent-${NODE_ID:-$(hostname)}
+  namespace: tenxo
+  labels:
+    app: tenxo-edge-agent
+    tenxo.node: "${NODE_ID:-ephemeral}"
+    tenxo.confidential: "true"
+  annotations:
+    # ── Runtime class for hardware TEE (AMD SEV-SNP / Intel TDX) ──
+    # Requires a RuntimeClass resource that selects a compatible runtime
+    # (e.g., Kata Containers with CC, or a SEV-capable containerd shim).
+    # If the cluster doesn't have it, the pod hangs in Pending.
+    "kata.runtimeclass.katacontainers.io/runtimeclass": "kata-cc"
+    # ── Sidecar injection blocker — no service mesh proxies inside TEE ──
+    "sidecar.istio.io/inject": "false"
+    "traffic.sidecar.istio.io/excludeOutboundIPRanges": "0.0.0.0/0"
+spec:
+  # ── Runtime Class ──────────────────────────────────────────────────
+  # Choose ONE based on available hardware:
+  #   kata-cc            — Kata Containers with AMD SEV-SNP / Intel TDX
+  #   kata-qemu-sev      — Kata with QEMU + SEV (older clusters)
+  #   runc               — Standard runc (no TEE — dev only)
+  runtimeClassName: kata-cc
+
+  # ── Node selection — GPU-enabled, TEE-capable nodes ────────────────
+  nodeSelector:
+    accelerator: nvidia
+    confidential-computing: sev-snp
+    nvidia.com/gpu.product: "NVIDIA-H100|NVIDIA-B200"
+
+  # ── Private Registry Credentials ────────────────────────────────────
+  # Created externally with:
+  #   kubectl create secret docker-registry regcred --docker-server=ghcr.io ...
+  imagePullSecrets:
+    - name: regcred
+
+  # ── Security Context (pod-level) ────────────────────────────────────
+  # No privileged containers, no host access, no root.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    seccompProfile:
+      type: RuntimeDefault
+    seLinuxOptions:
+      level: "s0:c0,c1"
+    supplementalGroups: [44, 100]
+
+  # ── Init Container: Set up encrypted workspace ─────────────────────
+  # Runs before the main agent to prepare the encrypted volume.
+  initContainers:
+    - name: workspace-init
+      image: tenxo/workspace-init:latest
+      imagePullPolicy: Always
+      securityContext:
+        capabilities:
+          add: ["SYS_ADMIN", "SYS_PTRACE"]
+        privileged: false
+        allowPrivilegeEscalation: false
+      env:
+        - name: STORAGE_SIZE_GB
+          value: "64"
+        - name: KMS_ENDPOINT
+          value: "https://kms.tenxo.internal/v1/keys"
+        - name: KMS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: kms-token
+              key: token
+        - name: MOUNTPOINT
+          value: /mnt/ephemeral_workspace
+      volumeMounts:
+        - name: ephemeral-storage
+          mountPath: /mnt/ephemeral_workspace
+        - name: dev-volume
+          mountPath: /dev
+        - name: host-sys
+          mountPath: /sys
+      resources:
+        limits:
+          cpu: "1"
+          memory: 512Mi
+        requests:
+          cpu: "0.5"
+          memory: 256Mi
+
+  # ── Main Edge Agent Container ───────────────────────────────────────
+  containers:
+    - name: edge-agent
+      image: ghcr.io/tenxo/edge-agent:latest
+      imagePullPolicy: Always
+      command:
+        - /edge-agent
+      args:
+        - --workspace
+        - /mnt/ephemeral_workspace/workspace
+      env:
+        # ── Node identity ──────────────────────────────────────────
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: MATCHMAKER_URL
+          value: "https://matchmaker.tenxo.internal"
+        - name: OWNER
+          value: "${OWNER:-unknown}"
+
+        # ── NVIDIA Confidential Compute (Hopper/Blackwell) ─────────
+        # Encrypts PCIe data lanes between CPU and GPU VRAM.
+        # Requires nvidia-peermem, nv_peer_mem, or nvidia-fs drivers.
+        - name: NVIDIA_CONFIDENTIAL_COMPUTING
+          value: "1"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility,graphics,video"
+        - name: NVIDIA_REQUIRE_CUDA
+          value: "cuda>=12.4"
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+
+        # ── TEE-specific env ───────────────────────────────────────
+        - name: CC_GUEST_MODE
+          value: "1"
+        - name: OE_SIMULATION
+          value: "0"
+
+      securityContext:
+        # Drop all capabilities — no kernel access
+        capabilities:
+          drop: ["ALL"]
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        procMount: Default
+
+      # ── Hardware GPU passthrough ─────────────────────────────────
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+          # Memory and CPU limits to prevent DoS on host
+          cpu: "16"
+          memory: "128Gi"
+          ephemeral-storage: "10Gi"
+        requests:
+          nvidia.com/gpu: 1
+          cpu: "4"
+          memory: "32Gi"
+          ephemeral-storage: "1Gi"
+
+      # ── Volume mounts ────────────────────────────────────────────
+      volumeMounts:
+        - name: ephemeral-storage
+          mountPath: /mnt/ephemeral_workspace
+        - name: dev-volume
+          mountPath: /dev
+          mountPropagation: HostToContainer
+        - name: nvidia-install-dir
+          mountPath: /usr/local/nvidia
+        - name: tee-devices
+          mountPath: /dev/sev
+
+      # ── Liveness / Readiness ─────────────────────────────────────
+      livenessProbe:
+        exec:
+          command: ["/edge-agent", "--health-check"]
+        initialDelaySeconds: 30
+        periodSeconds: 15
+        failureThreshold: 3
+      readinessProbe:
+        exec:
+          command: ["/edge-agent", "--ready-check"]
+        initialDelaySeconds: 10
+        periodSeconds: 5
+
+      # ── Graceful shutdown triggers the wiping routine ────────────
+      lifecycle:
+        preStop:
+          exec:
+            command: ["/teardown-wipe.sh", "--container-id", "$(HOSTNAME)"]
+
+    # ── Sidecar: NVIDIA CC Agent (for Hopper/Blackwell PCIe encryption) ─
+    - name: nvidia-cc
+      image: nvidia/cc-manager:latest
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        capabilities:
+          add: ["SYS_ADMIN", "SYS_RAWIO"]
+        privileged: false
+      env:
+        - name: CC_MODE
+          value: "confidential"
+        - name: GPU_RESET_ON_EXIT
+          value: "true"
+      volumeMounts:
+        - name: nvidia-install-dir
+          mountPath: /usr/local/nvidia
+        - name: tee-devices
+          mountPath: /dev/sev
+      resources:
+        limits:
+          cpu: "1"
+          memory: 256Mi
+        requests:
+          cpu: "100m"
+          memory: 64Mi
+
+  # ── Volumes ─────────────────────────────────────────────────────────
+  volumes:
+    # Ephemeral encrypted storage — lives inside pod, destroyed on eviction
+    - name: ephemeral-storage
+      emptyDir:
+        medium: Memory
+        sizeLimit: 128Gi
+
+    # Host dev passthrough (for cryptsetup, nvidia-smi in init)
+    - name: dev-volume
+      hostPath:
+        path: /dev
+        type: CharDevice
+
+    # NVIDIA driver installation directory from host
+    - name: nvidia-install-dir
+      hostPath:
+        path: /usr/local/nvidia
+        type: DirectoryOrCreate
+
+    # TEE device (AMD SEV-SNP)
+    - name: tee-devices
+      hostPath:
+        path: /dev/sev
+        type: CharDevice
+
+  # ── Restart policy ──────────────────────────────────────────────────
+  restartPolicy: Never
+
+  # ── Affinity: prefer unique nodes per replica ───────────────────────
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          labelSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: ["tenxo-edge-agent"]
+          topologyKey: kubernetes.io/hostname
+
+  # ── Tolerations for GPU nodes ───────────────────────────────────────
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    - key: "tenxo/confidential"
+      operator: "Equal"
+      value: "true"
+      effect: "NoSchedule"
+
+---
+# ─── RuntimeClass for Confidential Containers ────────────────────────────
+# This must be created cluster-wide BEFORE the pod above.
+# It tells the scheduler to use a runtime that supports hardware TEE.
+# Example uses Kata Containers with CC shim (v3+).
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-cc
+handler: kata-cc
+overhead:
+  podFixed:
+    cpu: "250m"
+    memory: "512Mi"
+scheduling:
+  nodeSelector:
+    confidential-computing: "sev-snp"
+  tolerations:
+    - effect: NoSchedule
+      key: kata-cc
+      operator: Exists

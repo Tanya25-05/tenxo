@@ -52,6 +52,15 @@ type NodeInfo struct {
 	TTL           int64      `json:"ttl_seconds"`
 }
 
+type WorkspaceInfo struct {
+	WorkspaceID string    `json:"workspace_id"`
+	Owner       string    `json:"owner,omitempty"`
+	UploadURL   string    `json:"upload_url,omitempty"`
+	OverlayURL  string    `json:"overlay_url,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 type Store interface {
 	Migrate(ctx context.Context) error
 
@@ -92,6 +101,10 @@ type Store interface {
 	UsageStop(ctx context.Context, userID, jobID string) (elapsed int64, err error)
 
 	ReapStaleJobs(ctx context.Context, maxAge time.Duration) ([]string, error)
+
+	WorkspaceSet(ctx context.Context, workspaceID string, fields map[string]string) error
+	WorkspaceGet(ctx context.Context, workspaceID string) (map[string]string, error)
+	ListWorkspacesByOwner(ctx context.Context, owner string, limit int) ([]WorkspaceInfo, error)
 
 	Close()
 }

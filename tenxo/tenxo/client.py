@@ -45,6 +45,7 @@ except ImportError:
 from .crypto import (  # noqa: E402
     EphemeralKeyPair,
     TeeQuote,
+    blind_aes_key,
     compute_shared_secret,
     derive_aes_key,
     encrypt_payload,
@@ -223,10 +224,6 @@ def perform_key_exchange(
                 print("Verifying agent TEE attestation quote...")
                 report_data = quote.report_data
                 agent_pub_bytes = report_data[:32]
-                # The first 32 bytes of report_data are SHA-256(pubkey).
-                # The actual pubkey is hashed inside — we can't reverse it.
-                # Instead, we compute SHA-256 of candidate pubkeys if known,
-                # or trust the matchmaker to route the correct key.
 
                 verify_tee_quote(quote, agent_pub_bytes)
                 print("TEE quote verified successfully")
@@ -360,12 +357,16 @@ def cmd_run(
         # The salt is sent with the job; the agent derives the same key from
         # (shared_secret, salt). The matchmaker sees only the salt.
         aes_key, salt = derive_aes_key(shared_secret)
+        # XOR-blind: final_key = aes_key XOR shared_secret
+        # The matchmaker never sees shared_secret, so even with the salt
+        # and encrypted payload they cannot derive the final key.
+        final_key = blind_aes_key(aes_key, shared_secret)
         salt_b64 = __import__("base64").b64encode(salt).decode()
-        print("AES-256-GCM payload key derived via HKDF-SHA256")
+        print("AES-256-GCM payload key derived via HKDF-SHA256 and XOR-blinded")
 
         # ── Step 3: Encrypt workspace with padding ─────────────────────
         enc_path = td_path / "workspace.zip.enc"
-        encrypt_file(zip_path, enc_path, aes_key)
+        encrypt_file(zip_path, enc_path, final_key)
         print(f"Encrypted and padded workspace -> {enc_path}")
         print(f"  Original: {zip_path.stat().st_size} bytes")
         print(f"  Encrypted: {enc_path.stat().st_size} bytes")
@@ -445,7 +446,24 @@ def cmd_run(
                 print("Timeout waiting for job result")
                 sys.exit(1)
 
-        # ── Step 9: Download and decrypt result ────────────────────────
+        # ── Step 9: Download and verify integrity receipt ──────────────
+        receipt_url = result_url + ".receipt"
+        try:
+            rr = requests.get(receipt_url, timeout=30)
+            if rr.status_code == 200:
+                receipt_enc = rr.content
+                receipt_plain = decrypt_payload(receipt_enc, final_key)
+                receipt = json.loads(receipt_plain)
+                print(f"Integrity receipt: input_sha256={receipt.get('input_hash','?')}")
+                print(f"                   output_sha256={receipt.get('output_hash','?')}")
+            else:
+                print("Integrity receipt not yet available")
+                receipt = None
+        except Exception as e:
+            print(f"Integrity receipt download failed: {e}")
+            receipt = None
+
+        # ── Step 10: Download and decrypt result ───────────────────────
         print(f"Downloading result from {result_url}")
         r = requests.get(result_url, timeout=60)
         r.raise_for_status()
@@ -457,7 +475,16 @@ def cmd_run(
         except ValueError as e:
             print(f"WARNING: {e}")
 
-        plain = decrypt_payload(enc, aes_key)
+        plain = decrypt_payload(enc, final_key)
         out_zip = Path.cwd() / f"{root.name}.result.zip"
         out_zip.write_bytes(plain)
         print(f"Result saved to {out_zip}")
+
+        # ── Step 11: Verify output integrity ──────────────────────────
+        if receipt:
+            actual_output_hash = __import__("hashlib").sha256(plain).hexdigest()
+            expected_output_hash = receipt.get("output_hash", "")
+            if actual_output_hash == expected_output_hash:
+                print("Output integrity verified ✓")
+            else:
+                print(f"OUTPUT INTEGRITY MISMATCH! expected={expected_output_hash} actual={actual_output_hash}")

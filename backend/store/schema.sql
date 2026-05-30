@@ -81,3 +81,13 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
 
 CREATE INDEX IF NOT EXISTS idx_payment_transactions_user_created_at
     ON payment_transactions(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    workspace_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    upload_url TEXT NOT NULL DEFAULT '',
+    enc_key_b64 TEXT NOT NULL DEFAULT '',
+    overlay_url TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

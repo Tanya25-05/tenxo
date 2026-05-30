@@ -55,12 +55,14 @@ type Server struct {
 }
 
 type JobRequest struct {
-	EncryptedJobLink string `json:"encrypted_job_link"`
-	JobLink          string `json:"job_link"`
-	JobID            string `json:"job_id"`
-	EncKeyB64        string `json:"enc_key_b64"`
-	SaltB64          string `json:"salt_b64"`
-	GPUModel         string `json:"gpu_model"`
+	EncryptedJobLink        string `json:"encrypted_job_link"`
+	JobLink                 string `json:"job_link"`
+	JobID                   string `json:"job_id"`
+	EncKeyB64               string `json:"enc_key_b64"`
+	SaltB64                 string `json:"salt_b64"`
+	GPUModel                string `json:"gpu_model"`
+	WorkspaceID             string `json:"workspace_id,omitempty"`
+	EncryptedWorkspaceKeyB64 string `json:"encrypted_workspace_key_b64,omitempty"`
 }
 
 type HeartbeatPayload struct {
@@ -168,8 +170,11 @@ func main() {
 	http.HandleFunc("/storage/upload/", cors(srv.authMiddleware(srv.handleStorageUpload)))
 	http.HandleFunc("/storage/result-upload/", cors(srv.authMiddleware(srv.handleStorageResultUpload)))
 	http.HandleFunc("/storage/result/", cors(srv.authMiddleware(srv.handleStorageGet)))
+	http.HandleFunc("/storage/receipt/", cors(srv.authMiddleware(srv.handleStorageReceipt)))
 	http.HandleFunc("/ws", cors(srv.handleWS))
 	http.HandleFunc("/agent/heartbeat", cors(srv.handleAgentHeartbeat))
+	http.HandleFunc("/workspace", cors(srv.authMiddleware(srv.handleWorkspace)))
+	http.HandleFunc("/workspace/", cors(srv.authMiddleware(srv.handleWorkspaceByID)))
 
 	// Zero-knowledge key exchange signaling (routes only, never inspects keys)
 	RegisterSignalingRoutes(http.DefaultServeMux)
@@ -669,6 +674,17 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.SaltB64 != "" {
 		msg["salt_b64"] = payload.SaltB64
+	}
+	if payload.WorkspaceID != "" {
+		msg["workspace_id"] = payload.WorkspaceID
+		// Look up the workspace's upload_url and pass it to the agent
+		ws, err := s.st.WorkspaceGet(ctx, payload.WorkspaceID)
+		if err == nil {
+			msg["workspace_url"] = ws["upload_url"]
+		}
+	}
+	if payload.EncryptedWorkspaceKeyB64 != "" {
+		msg["encrypted_workspace_key_b64"] = payload.EncryptedWorkspaceKeyB64
 	}
 	msgData, err := json.Marshal(msg)
 	if err != nil {
@@ -1174,6 +1190,140 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeFile(w, r, path)
+}
+
+// handleStorageReceipt serves the integrity receipt for a completed job.
+// ─── Workspace Handlers ─────────────────────────────────────────────────────
+
+func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPost:
+		var req struct {
+			WorkspaceID string `json:"workspace_id"`
+			UploadURL   string `json:"upload_url"`
+			EncKeyB64   string `json:"enc_key_b64"`
+			OverlayURL  string `json:"overlay_url,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if req.WorkspaceID == "" {
+			http.Error(w, "workspace_id required", http.StatusBadRequest)
+			return
+		}
+		ctx := r.Context()
+		_ = s.st.WorkspaceSet(ctx, req.WorkspaceID, map[string]string{
+			"owner":       userID,
+			"upload_url":  req.UploadURL,
+			"enc_key_b64": req.EncKeyB64,
+			"overlay_url": req.OverlayURL,
+		})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "created", "workspace_id": req.WorkspaceID})
+
+	case http.MethodGet:
+		ctx := r.Context()
+		workspaces, err := s.st.ListWorkspacesByOwner(ctx, userID, 50)
+		if err != nil {
+			http.Error(w, "failed to list workspaces", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"workspaces": workspaces})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleWorkspaceByID(w http.ResponseWriter, r *http.Request) {
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	workspaceID := sanitizeJobID(strings.TrimPrefix(r.URL.Path, "/workspace/"))
+	if workspaceID == "" {
+		http.Error(w, "invalid workspace id", http.StatusBadRequest)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := r.Context()
+	ws, err := s.st.WorkspaceGet(ctx, workspaceID)
+	if err != nil {
+		http.Error(w, "workspace not found", http.StatusNotFound)
+		return
+	}
+	if ws["owner"] != userID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ws)
+}
+
+func (s *Server) handleStorageReceipt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	rawID := strings.TrimPrefix(r.URL.Path, "/storage/receipt/")
+	// Remove .receipt suffix if present
+	jobID := sanitizeJobID(strings.TrimSuffix(rawID, ".receipt"))
+	if jobID == "" {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	data, err := s.st.JobGetAll(ctx, jobID)
+	if err != nil || len(data) == 0 {
+		http.Error(w, "unknown job id", http.StatusNotFound)
+		return
+	}
+
+	owner, ok := data["owner"]
+	if !ok || owner == "" || owner != userID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Look for receipt file
+	uploadsDir := getEnv("UPLOADS_DIR", "uploads")
+	receiptPath, err := safeStoragePath(uploadsDir, jobID+".receipt.enc")
+	if err != nil {
+		http.Error(w, "invalid receipt path", http.StatusBadRequest)
+		return
+	}
+	if _, err := os.Stat(receiptPath); os.IsNotExist(err) {
+		// Try alternate naming
+		receiptPath, err = safeStoragePath(uploadsDir, jobID+".result.enc.receipt")
+		if err != nil || os.IsNotExist(err) {
+			http.Error(w, "receipt not available yet", http.StatusNotFound)
+			return
+		}
+	}
+	http.ServeFile(w, r, receiptPath)
 }
 
 func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {

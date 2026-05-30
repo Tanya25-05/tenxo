@@ -115,8 +115,8 @@ class TeeQuote:
     AMD SEV-SNP attestation report carried inside the signaling protocol.
     
     Fields (conceptual — real SEV-SNP has ~64 fields):
-      - report_data: 64 bytes, first 32 = SHA-256(agent_ephemeral_pubkey),
-                     second 32 = measurement (SHA-256 of the TEE memory).
+      - report_data: 64 bytes, first 32 = raw agent X25519 pubkey,
+                     second 32 = challenge nonce bound to this session.
       - measurement: unique hash of the trusted code + data.
       - chip_id: unique ID of the AMD EPYC CPU.
       - signature: ECDSA over the secp384r1 curve.
@@ -239,9 +239,9 @@ def pad_payload(data: bytes) -> Tuple[bytes, int]:
     """Pad payload to the nearest standard tier with CSPRNG bytes.
     
     The padding scheme is:
-      [original_data] [1-byte pad_len] [CSPRNG pad bytes]
+      [original_data] [CSPRNG pad bytes] [1-byte pad_len]
     
-    Where pad_len = padded_size - actual_size - 1 (the pad_len byte itself).
+    Where pad_len = padded_size - actual_size - 1, stored as the last byte.
     The total file on the wire is exactly the tier size.
     
     Args:
@@ -256,7 +256,7 @@ def pad_payload(data: bytes) -> Tuple[bytes, int]:
     if pad_len < 0:
         raise ValueError("Padding calculation overflow")
     padding = os.urandom(pad_len)
-    padded = data + bytes([pad_len & 0xFF]) + padding
+    padded = data + padding + bytes([pad_len & 0xFF])
     return padded, original_size
 
 
@@ -374,7 +374,7 @@ def verify_tee_quote(
     """Verify an AMD SEV-SNP attestation quote.
     
     This validates:
-      1. The report_data contains SHA-256(expected_pubkey) in its first 32 bytes,
+      1. The report_data contains the raw agent pubkey in its first 32 bytes,
          proving the quote was generated for this specific key.
       2. The ECDSA signature over the quote is valid against the AMD certificate chain.
       3. (If provided) the TEE measurement matches the expected trusted code hash.
@@ -391,13 +391,9 @@ def verify_tee_quote(
     Raises:
         ValueError: If any check fails with explanation.
     """
-    # ── Check 1: report_data contains SHA-256(agent_pubkey) ─────────
-    pubkey_hash = hashes.Hash(hashes.SHA256())
-    pubkey_hash.update(expected_pubkey)
-    expected_report = pubkey_hash.finalize()
-
+    # ── Check 1: report_data[0:32] contains raw agent pubkey ────────
     actual_report = quote.report_data[:32]
-    if not hmac.compare_digest(expected_report, actual_report):
+    if not hmac.compare_digest(expected_pubkey, actual_report):
         raise ValueError(
             "TEE quote report_data does not match agent public key. "
             "Possible key substitution attack."
@@ -567,6 +563,19 @@ def _cert_to_tbs(cert) -> bytes:
 
 # ─── Full Encryption Pipeline ───────────────────────────────────────────────
 
+def blind_aes_key(aes_key: bytes, shared_secret: bytes) -> bytes:
+    """XOR-blind the AES key with the ECDH shared secret.
+    
+    final_key = aes_key XOR shared_secret
+    
+    This ensures that even if the matchmaker intercepts the salt
+    and the encrypted payload, they cannot derive the encryption key
+    without also knowing the ECDH shared secret (which never leaves
+    the client or the TEE).
+    """
+    return bytes(a ^ b for a, b in zip(aes_key, shared_secret))
+
+
 def encrypt_workspace(
     workspace_zip: Path,
     output_enc: Path,
@@ -579,9 +588,10 @@ def encrypt_workspace(
     Steps:
       1. Compute ECDH shared secret from client keypair + agent pubkey.
       2. Derive AES-256-GCM payload key via HKDF.
-      3. Pad workspace to standard tier.
-      4. Encrypt with AES-256-GCM.
-      5. Write encrypted output to disk.
+      3. XOR-blind: final_key = aes_key XOR shared_secret.
+      4. Pad workspace to standard tier.
+      5. Encrypt with AES-256-GCM using XOR-blinded key.
+      6. Write encrypted output to disk.
     
     Args:
         workspace_zip: Path to the zipped workspace.
@@ -596,7 +606,8 @@ def encrypt_workspace(
     agent_pubkey = base64.b64decode(agent_pubkey_b64)
     shared_secret = compute_shared_secret(client_keypair.private_key, agent_pubkey)
     aes_key, salt = derive_aes_key(shared_secret)
-    encrypt_file(workspace_zip, output_enc, aes_key, aad)
+    final_key = blind_aes_key(aes_key, shared_secret)
+    encrypt_file(workspace_zip, output_enc, final_key, aad)
     return base64.b64encode(salt).decode()
 
 

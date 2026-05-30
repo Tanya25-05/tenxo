@@ -360,3 +360,70 @@ func (m *MockStore) UsageStop(ctx context.Context, userID, jobID string) (elapse
 func (m *MockStore) ReapStaleJobs(ctx context.Context, maxAge time.Duration) ([]string, error) {
 	return nil, nil
 }
+
+type mockWorkspace struct {
+	WorkspaceID string
+	Owner       string
+	UploadURL   string
+	EncKeyB64   string
+	OverlayURL  string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+var (
+	wsMu        sync.Mutex
+	workspaces  = make(map[string]*mockWorkspace)
+	wsSeq       int
+)
+
+func (m *MockStore) WorkspaceSet(ctx context.Context, workspaceID string, fields map[string]string) error {
+	wsMu.Lock()
+	defer wsMu.Unlock()
+	w, ok := workspaces[workspaceID]
+	if !ok {
+		w = &mockWorkspace{WorkspaceID: workspaceID, CreatedAt: time.Now()}
+		workspaces[workspaceID] = w
+	}
+	if v, ok := fields["owner"]; ok { w.Owner = v }
+	if v, ok := fields["upload_url"]; ok { w.UploadURL = v }
+	if v, ok := fields["enc_key_b64"]; ok { w.EncKeyB64 = v }
+	if v, ok := fields["overlay_url"]; ok { w.OverlayURL = v }
+	w.UpdatedAt = time.Now()
+	return nil
+}
+
+func (m *MockStore) WorkspaceGet(ctx context.Context, workspaceID string) (map[string]string, error) {
+	wsMu.Lock()
+	defer wsMu.Unlock()
+	w, ok := workspaces[workspaceID]
+	if !ok {
+		return nil, errors.New("workspace not found")
+	}
+	return map[string]string{
+		"owner":       w.Owner,
+		"upload_url":  w.UploadURL,
+		"enc_key_b64": w.EncKeyB64,
+		"overlay_url": w.OverlayURL,
+	}, nil
+}
+
+func (m *MockStore) ListWorkspacesByOwner(ctx context.Context, owner string, limit int) ([]WorkspaceInfo, error) {
+	wsMu.Lock()
+	defer wsMu.Unlock()
+	if limit <= 0 || limit > 100 { limit = 50 }
+	var result []WorkspaceInfo
+	for _, w := range workspaces {
+		if w.Owner == owner {
+			result = append(result, WorkspaceInfo{
+				WorkspaceID: w.WorkspaceID,
+				Owner:       w.Owner,
+				UploadURL:   w.UploadURL,
+				OverlayURL:  w.OverlayURL,
+				CreatedAt:   w.CreatedAt,
+				UpdatedAt:   w.UpdatedAt,
+			})
+		}
+	}
+	return result, nil
+}

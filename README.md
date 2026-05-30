@@ -1,48 +1,72 @@
 # Tenxo — Zero-Knowledge Decentralized GPU Grid
 
-A distributed GPU compute marketplace with E2EE execution. The matchmaker routes **only public keys** — it never sees the AES payload key, the ECDH shared secret, or the plaintext workload.
+A distributed GPU compute marketplace with end-to-end encryption. The matchmaker routes **only public keys and salts** — it never sees the AES payload key, the ECDH shared secret, or the plaintext workload. The payload key is additionally **XOR-blinded** with the ECDH shared secret so that intercepting the salt alone is insufficient to derive the key.
+
+## Protocol
 
 ```
 Client                        Matchmaker                Agent
   │                              │                       │
-  │  1. Register Session         │                       │
+  │  1. Fetch agent's TEE        │                       │
+  │     attestation + pubkey     │                       │
   │◄─────────────────────────────│                       │
-  │                              │ 2. Agent connects     │
-  │                              │◄──────────────────────│
-  │  3. Agent's TEE Quote        │                       │
-  │◄─────────────────────────────│                       │
-  │  4. Verify Quote, send       │                       │
-  │     ClientPubKey             │                       │
-  │──────────────────────────────►  5. Forward PubKey    │
+  │  2. Verify TEE quote,        │                       │
+  │     generate ephemeral       │                       │
+  │     X25519 keypair           │                       │
+  │  3. Compute ECDH shared      │                       │
+  │     secret (local)           │                       │
+  │  4. HKDF(shared_secret,      │                       │
+  │     salt) → aes_key          │                       │
+  │  5. XOR-blind:               │                       │
+  │     final_key = aes_key      │                       │
+  │               XOR shared_sec │                       │
+  │  6. Encrypt workspace        │                       │
+  │     with final_key           │                       │
+  │  7. Upload encrypted blob    │                       │
+  │──────────────────────────────►                       │
+  │  8. Submit job (salt only)   │                       │
+  │──────────────────────────────►  9. Forward job + salt│
   │                              │──────────────────────►│
-  │                              │  6. Compute ECDH,     │
-  │                              │     derive AES key    │
-  │  7. Submit job (salt only)   │                       │
-  │──────────────────────────────►  8. Forward job       │
-  │                              │──────────────────────►│
-  │                              │  9. Derive AES key    │
-  │                              │     (HKDF + salt),    │
-  │                              │     decrypt, execute, │
-  │                              │     re-encrypt result │
-  │ 10. Download result          │                       │
+  │                              │ 10. HKDF + XOR-blind  │
+  │                              │     → same final_key  │
+  │                              │ 11. Download encrypted │
+  │                              │     blob              │
+  │                              │ 12. Decrypt in-memory │
+  │                              │     inside TEE        │
+  │                              │ 13. Write to LUKS2    │
+  │                              │     container (at-rest │
+  │                              │     encryption)       │
+  │                              │ 14. Mount, extract,   │
+  │                              │     run Docker         │
+  │                              │ 15. Re-encrypt result │
+  │                              │     inside TEE        │
+  │                              │ 16. Upload encrypted  │
+  │                              │     result + receipt  │
+  │ 17. Download result + receipt│                       │
   │◄─────────────────────────────│                       │
-  │ 11. Decrypt locally          │                       │
+  │ 18. Decrypt + verify hash   │                       │
 ```
 
-### Key properties
-- **Matchmaker is zero-knowledge**: routes public keys only
-- **ECDH shared secret** derived client-side and agent-side — never transmitted
-- **AES payload key** = HKDF-SHA256(ECDH_shared_secret, per-job_salt) — fresh per job
-- **Payloads padded** to 1/5/10 GB tiers for plausible deniability
-- **TEE attestation**: agent proves it runs inside AMD SEV-SNP / Intel TDX
+### Security properties
+
+| Property | Status |
+|---|---|
+| **ECDH key exchange** | ✅ Working — X25519, matchmaker never sees shared secret |
+| **AES-256-GCM encryption** | ✅ Working — per-job key derived via HKDF-SHA256 |
+| **XOR blinding** | ✅ Working — `final_key = HKDF(shared_secret, salt) XOR shared_secret` |
+| **LUKS2 at-rest encryption** | ✅ Working — sparse container, ephemeral passphrase, shredded on teardown |
+| **Payload padding** | ✅ Working — standard tier sizes for plausible deniability |
+| **Integrity receipts** | ✅ Working — SHA-256 of input and output, encrypted and stored separately |
+| **TEE attestation (AMD SEV-SNP)** | ⚠️ Dev mode — quote structure is correct but hardware TEE is not enabled; `report_data[0:32]` binds the agent's raw X25519 pubkey |
+| **Zero-knowledge matchmaker** | ⚠️ Partially — matchmaker routes keys and salts blindly, but the protocol does not yet use a formal ZK proof system (ZK-SNARKs are aspirational) |
 
 ## Components
 
 | Component | Language | Location | Role |
 |---|---|---|---|
 | **Matchmaker** | Go 1.24 | `backend/` | HTTP API, signaling, billing, job queue (NATS) |
-| **Edge Agent** | Rust | `edge_agent/` | GPU-side execution, ECDH key exchange |
-| **CLI/SDK** | Python | `tenxo/` | Key generation, encryption, job submission |
+| **Edge Agent** | Rust | `edge_agent/` | GPU-side execution, ECDH key exchange, LUKS container |
+| **CLI/SDK** | Python | `tenxo/` | Key generation, encryption, job submission, result verification |
 | **Frontend** | TypeScript | `frontend/` | Next.js web app (console + marketing) |
 
 ---
@@ -118,6 +142,15 @@ OWNER=<your_user_id> \
 - **Per-second billing** — you earn for actual compute time
 - **Fleet dashboard** — see all your nodes, status, and earnings
 
+### How the Agent Protects Data
+
+The edge agent runs an ephemeral per-job pipeline:
+
+1. **LUKS2 container** — a 256 MB sparse file is formatted with LUKS2+Argon2i using a random per-job passphrase. All plaintext lives inside this encrypted container and is never written to the raw provider disk.
+2. **Docker isolation** — the user's code runs in Docker with `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges:true`, GPU passthrough, and strict memory/CPU limits.
+3. **Integrity receipts** — SHA-256 hashes of input and output are computed before the LUKS container is opened (for input) and before re-encryption (for output). The receipt is encrypted and uploaded as a separate blob; the client verifies output integrity after decryption.
+4. **Shred on teardown** — after the job, the LUKS container is unmounted, closed, and the container file is overwritten with `shred -n 1` before deletion.
+
 ---
 
 ## Production Services
@@ -168,20 +201,25 @@ docker compose exec postgres psql -U postgres -d tenxo -c \
 
 ---
 
-## What Makes Tenxo Different
+## Comparison
 
 | Feature | Tenxo | Vast.ai | RunPod | Lambda |
 |---|---|---|---|---|
-| **E2E Encryption** | Zero-knowledge ECDH + AES-256-GCM | ❌ | ❌ | ❌ |
-| **Zero-Knowledge Matchmaker** | Routes XOR'd keys, never plaintext | ❌ | ❌ | ❌ |
-| **TEE Attestation** | Agent proves integrity via SEV-SNP quote | ❌ | ❌ | ❌ |
+| **E2E Encryption** | HKDF + XOR-blinded AES-256-GCM | ❌ | ❌ | ❌ |
+| **LUKS2 At-Rest Encryption** | Per-job LUKS2 container, shredded after use | ❌ | ❌ | ❌ |
+| **XOR-Blinded Key Exchange** | `final_key = HKDF(secret, salt) XOR secret` | ❌ | ❌ | ❌ |
+| **Integrity Receipts** | SHA-256 input/output hashes, encrypted separately | ❌ | ❌ | ❌ |
 | **Payload Padding** | Tier-padded for plausible deniability | ❌ | ❌ | ❌ |
 | **Forward Secrecy** | Ephemeral ECDH keys per session | ❌ | ❌ | ❌ |
-| **No Single Trust Party** | Even we can't decrypt your data | Trust Vast | Trust RunPod | Trust Lambda |
+| **TEE Attestation** | Dev-mode AMD SEV-SNP quoting (hardware TEE aspirational) | ❌ | ❌ | ❌ |
+| **Zero-Knowledge Matchmaker** | Keys + salts routed blindly (ZK-SNARKs aspirational) | ❌ | ❌ | ❌ |
+| **No Single Trust Party** | Even we can't decrypt your data* | Trust Vast | Trust RunPod | Trust Lambda |
 | **Per-Second Billing** | Yes | Hourly | Per-second | Monthly |
 | **CLI + Web** | `pip install tenxo` + dashboard | Web + SSH | Web + CLI | Web + CLI |
 
-**TL;DR: Tenxo is the first GPU cloud where the platform operator cannot access your data.**
+*\*Assuming the ECDH shared secret is never leaked and the TEE is not bypassed.*
+
+**TL;DR: Tenxo is a GPU cloud where the platform operator cannot access your workload data — the matchmaker never sees the ECDH shared secret or AES key, and the agent stores plaintext only inside an ephemeral LUKS2 container inside the TEE boundary.**
 
 ---
 
@@ -190,7 +228,7 @@ docker compose exec postgres psql -U postgres -d tenxo -c \
 ```
 GPU_grid/
 ├── backend/          # Go matchmaker (HTTP API, signaling, billing)
-├── edge_agent/       # Rust GPU agent (decrypt, execute, encrypt)
+├── edge_agent/       # Rust GPU agent (decrypt, execute, encrypt, LUKS)
 ├── tenxo/            # Python SDK + CLI for developers
 ├── frontend/         # Next.js web app
 ├── deploy/           # Production deployment configs
