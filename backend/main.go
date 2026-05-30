@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -222,8 +223,12 @@ func main() {
 		log.Println("payment: billing disabled — set RAZORPAY_KEY_ID to enable")
 	}
 
+	ln, err := net.Listen("tcp", apiAddr)
+	if err != nil {
+		log.Fatalf("http listener failed: %v", err)
+	}
 	log.Printf("HTTP server listening on %s", apiAddr)
-	if err := http.ListenAndServe(apiAddr, nil); err != nil {
+	if err := http.Serve(ln, nil); err != nil {
 		log.Fatalf("http server failed: %v", err)
 	}
 }
