@@ -57,6 +57,7 @@ Client                        Matchmaker                Agent
 | **LUKS2 at-rest encryption** | ✅ Working — sparse container, ephemeral passphrase, shredded on teardown |
 | **Payload padding** | ✅ Working — standard tier sizes for plausible deniability |
 | **Integrity receipts** | ✅ Working — SHA-256 of input and output, encrypted and stored separately |
+| **Kata Containers support** | ✅ Working — VM-level isolation via `AGENT_RUNTIME=kata` env var; NVIDIA GPU PCI passthrough |
 | **TEE attestation (AMD SEV-SNP)** | ⚠️ Dev mode — quote structure is correct but hardware TEE is not enabled; `report_data[0:32]` binds the agent's raw X25519 pubkey |
 | **Zero-knowledge matchmaker** | ⚠️ Partially — matchmaker routes keys and salts blindly, but the protocol does not yet use a formal ZK proof system (ZK-SNARKs are aspirational) |
 
@@ -141,6 +142,27 @@ OWNER=<your_user_id> \
 - **Weekly payouts** via Stripe Connect (minimum $50)
 - **Per-second billing** — you earn for actual compute time
 - **Fleet dashboard** — see all your nodes, status, and earnings
+
+### Container Runtime Selection
+
+The edge agent supports two container runtimes, selected via the `AGENT_RUNTIME` env var:
+
+| Runtime | Isolation | GPU | Setup Requirement |
+|---|---|---|---|
+| `docker` (default) | Namespace-level (host kernel shared) | `--gpus all` | Docker + nvidia-container-toolkit |
+| `kata` | VM-level (each container gets its own kernel via lightweight VM) | PCI device passthrough | Kata Containers runtime + Docker configured with `io.containerd.kata.v2` |
+
+Kata Containers (https://katacontainers.io) is an open-source runtime that wraps each container in a hardware-virtualized VM using QEMU, Cloud Hypervisor, or Firecracker. To use it:
+
+1. Install Kata Containers: `sudo apt-get install kata-containers` (Ubuntu) or `sudo dnf install kata-containers` (Fedora)
+2. Register the runtime in `/etc/docker/daemon.json`:
+   ```json
+   { "runtimes": { "kata": { "path": "/usr/bin/kata-runtime" } } }
+   ```
+3. Restart Docker: `sudo systemctl restart docker`
+4. Run the agent with `AGENT_RUNTIME=kata`
+
+The agent will auto-detect NVIDIA GPUs via `nvidia-smi` and pass them as PCI devices. When neither runtime is available or GPU detection fails, the job is rejected with a clear error.
 
 ### How the Agent Protects Data
 

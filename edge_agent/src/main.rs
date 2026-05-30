@@ -299,32 +299,95 @@ fn perform_key_exchange(
     Ok((shared_bytes.to_vec(), ws))
 }
 
-// ─── Docker Execution ──────────────────────────────────────────────────────
+// ─── Container Runtime (Docker / Kata) ──────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RuntimeKind {
+    Docker,
+    Kata,
+}
+
+fn get_container_runtime() -> RuntimeKind {
+    match env::var("AGENT_RUNTIME").unwrap_or_default().to_lowercase().as_str() {
+        "kata" => RuntimeKind::Kata,
+        _ => RuntimeKind::Docker,
+    }
+}
+
+fn detect_nvidia_pci_devices() -> Vec<String> {
+    let output = Command::new("nvidia-smi")
+        .args(["--query-gpu=pci.bus_id", "--format=csv,noheader,nounits"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
 
 fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value) -> Result<()> {
     let (image, cmd) = build_docker_config(job_type, config);
+    let runtime = get_container_runtime();
 
     let work_dir = workspace.to_string_lossy().to_string();
     let mount_ro = format!("{}:/workspace:ro", work_dir);
     let mount_out = format!("{}:/workspace/output", work_dir);
-    let mut docker_args = vec![
-        "run",
-        "--gpus", "all",
-        "--rm",
-        "--network", "none",          // No network access inside the container
-        "--security-opt", "no-new-privileges:true",
-        "--cap-drop", "ALL",
-        "-v", &mount_ro,
-        "-v", &mount_out,
-        "-w", "/workspace",
-        "-e", "JOB_ID=tenxo",
-        "-e", "PYTHONUNBUFFERED=1",
-        "--memory", "32g",
-        "--cpus", "8",
-        &image,
-    ];
-    docker_args.extend(cmd.iter().map(|s| s.as_str()));
 
+    let mut docker_args: Vec<String> = vec!["run".to_string()];
+
+    match runtime {
+        RuntimeKind::Kata => {
+            docker_args.push("--runtime=io.containerd.kata.v2".to_string());
+            // Kata does not support --gpus all; pass NVIDIA GPUs as PCI devices
+            let pci_devices = detect_nvidia_pci_devices();
+            if !pci_devices.is_empty() {
+                for pci_id in &pci_devices {
+                    docker_args.push("--device".to_string());
+                    docker_args.push(format!("/dev/bus/pci/{}:/dev/bus/pci/{}", pci_id, pci_id));
+                }
+                println!("Kata: passing {} NVIDIA GPU(s) as PCI devices", pci_devices.len());
+            } else {
+                println!("Kata: no NVIDIA GPUs detected via nvidia-smi");
+            }
+        }
+        RuntimeKind::Docker => {
+            docker_args.push("--gpus".to_string());
+            docker_args.push("all".to_string());
+        }
+    }
+
+    docker_args.push("--rm".to_string());
+    docker_args.push("--network".to_string());
+    docker_args.push("none".to_string());
+    docker_args.push("--security-opt".to_string());
+    docker_args.push("no-new-privileges:true".to_string());
+    docker_args.push("--cap-drop".to_string());
+    docker_args.push("ALL".to_string());
+    docker_args.push("-v".to_string());
+    docker_args.push(mount_ro);
+    docker_args.push("-v".to_string());
+    docker_args.push(mount_out);
+    docker_args.push("-w".to_string());
+    docker_args.push("/workspace".to_string());
+    docker_args.push("-e".to_string());
+    docker_args.push("JOB_ID=tenxo".to_string());
+    docker_args.push("-e".to_string());
+    docker_args.push("PYTHONUNBUFFERED=1".to_string());
+    docker_args.push("--memory".to_string());
+    docker_args.push("32g".to_string());
+    docker_args.push("--cpus".to_string());
+    docker_args.push("8".to_string());
+    docker_args.push(image);
+    for c in &cmd {
+        docker_args.push(c.clone());
+    }
+
+    println!("Running job with runtime {:?}", runtime);
     let output = Command::new("docker")
         .args(&docker_args)
         .output()
