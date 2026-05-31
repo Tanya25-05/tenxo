@@ -1396,11 +1396,18 @@ func (s *Server) subscribeResults() {
 		resultURL, _ := payload["result_url"].(string)
 		ctx := context.Background()
 		if jobID != "" {
+			updates := map[string]string{}
 			if status != "" {
-				_ = s.st.JobSet(ctx, jobID, map[string]string{"status": status})
+				updates["status"] = status
 			}
 			if resultURL != "" {
-				_ = s.st.JobSet(ctx, jobID, map[string]string{"result_url": resultURL})
+				updates["result_url"] = resultURL
+			}
+			if errMsg, ok := payload["error"].(string); ok && errMsg != "" {
+				updates["error"] = errMsg
+			}
+			if len(updates) > 0 {
+				_ = s.st.JobSet(ctx, jobID, updates)
 			}
 			owner, _ := s.st.JobGet(ctx, jobID, "owner")
 			if owner != "" {
