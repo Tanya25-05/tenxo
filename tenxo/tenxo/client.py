@@ -248,7 +248,7 @@ def perform_key_exchange(
                     raw = ws.recv(timeout=15)
                     msg = json.loads(raw)
                     if msg.get("type") == "tee_quote":
-                        quote = TeeQuote.deserialize(json.loads(msg["payload"]))
+                        quote = TeeQuote.deserialize(msg["payload"])
 
                     print("Verifying agent TEE attestation quote...")
                     report_data = quote.report_data
