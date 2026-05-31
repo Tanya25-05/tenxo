@@ -173,8 +173,11 @@ func (ss *SessionStore) GetSessionByNodeID(nodeID string) (*Session, bool) {
 //  2. Agent responds with TeeQuote containing challenge in report_data[32..64]
 //  3. Matchmaker verifies the challenge nonce is embedded in the quote
 //  4. Matchmaker creates a session, stores the quote, returns session ID
-//  5. Agent reads ClientPubKey from the same WebSocket (pushed by HandleClientWS)
-//  6. Once ClientPubKey arrives, agent can compute ECDH shared secret
+//  5. Agent sends register (node_id), then waits for client_pub_key
+//  6. Matchmaker waits on session.done (closed by HandleClientWS after
+//     the CLI client completes ECDH key exchange and its pubkey is
+//     forwarded to the agent)
+//  7. Once done, matchmaker enters bridge mode (WS ↔ NATS proxy)
 func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := ss.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -267,46 +270,54 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Step 5: Read register + ClientPubKey ──────────────────────────
-	// Agent first sends a "register" message with its node_id, then
-	// waits for "client_pub_key" routed from HandleClientWS.
-	conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
-	for {
-		_, raw, err = conn.ReadMessage()
-		if err != nil {
-			log.Printf("signaling: agent read failed (%s): %v", sessionID, err)
-			ss.DeleteSession(sessionID)
-			return
-		}
-
-		var keyMsg WSMessage
-		if err := json.Unmarshal(raw, &keyMsg); err != nil {
-			log.Printf("signaling: agent bad message (%s): %v", sessionID, err)
-			continue
-		}
-
-		switch keyMsg.Type {
-		case "register":
-			var reg struct {
-				NodeID string `json:"node_id"`
-			}
-			if err := json.Unmarshal(keyMsg.Payload, &reg); err == nil && reg.NodeID != "" {
-				session.NodeID = reg.NodeID
-				log.Printf("signaling: agent %s registered as node %s", sessionID, reg.NodeID)
-			}
-			continue
-		case "client_pub_key":
-			log.Printf("signaling: agent received client pubkey for session %s", sessionID)
-			goto got_key
-		default:
-			log.Printf("signaling: agent unexpected message type %s (%s)", keyMsg.Type, sessionID)
-			continue
-		}
+	// ── Step 5: Read register message from agent ─────────────────────
+	// Agent sends a "register" message with its node_id after receiving
+	// session_created. The agent then waits for client_pub_key to be
+	// routed from HandleClientWS — we do NOT need to read it here.
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	_, raw, err = conn.ReadMessage()
+	if err != nil {
+		log.Printf("signaling: agent read register failed (%s): %v", sessionID, err)
+		ss.DeleteSession(sessionID)
+		return
 	}
-got_key:
+	var regMsg WSMessage
+	if err := json.Unmarshal(raw, &regMsg); err != nil {
+		log.Printf("signaling: agent bad register message (%s): %v", sessionID, err)
+		ss.DeleteSession(sessionID)
+		return
+	}
+	if regMsg.Type == "register" {
+		var reg struct {
+			NodeID string `json:"node_id"`
+		}
+		if err := json.Unmarshal(regMsg.Payload, &reg); err == nil && reg.NodeID != "" {
+			session.NodeID = reg.NodeID
+			log.Printf("signaling: agent %s registered as node %s", sessionID, reg.NodeID)
+		}
+	} else {
+		log.Printf("signaling: agent expected register, got %s (%s)", regMsg.Type, sessionID)
+		ss.DeleteSession(sessionID)
+		return
+	}
+
+	// ── Step 6: Wait for key exchange to complete ─────────────────────
+	// HandleClientWS (or HandlePostClientKey) closes session.done after
+	// routing the client's ephemeral pubkey to the agent. We wait here
+	// instead of reading from the agent's WS — the agent never sends
+	// client_pub_key back; it receives it.
+	select {
+	case <-session.done:
+		log.Printf("signaling: key exchange complete for session %s", sessionID)
+	case <-time.After(5 * time.Minute):
+		log.Printf("signaling: key exchange timed out for session %s", sessionID)
+		ss.DeleteSession(sessionID)
+		return
+	}
+
 	ss.DeleteSession(sessionID)
 
-	// ── Step 6: Persistent bridge mode: WS ↔ NATS ────────────────────
+	// ── Step 7: Persistent bridge mode: WS ↔ NATS ────────────────────
 	// After key exchange, the WebSocket stays open and acts as a NATS
 	// proxy for this agent. This avoids exposing the NATS port to the
 	// internet — agents communicate entirely through port 8080.

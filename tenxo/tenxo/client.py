@@ -151,22 +151,22 @@ def perform_key_exchange(
     api_url: str, headers: dict, gpu_model: str | None = None, node_id: str | None = None
 ) -> tuple[bytes, bytes, bytes, str]:
     """Perform ECDH key exchange via zero-knowledge signaling.
-    
+
     The matchmaker routes public keys and TEE quotes without inspecting them.
-    
+
     Args:
         api_url: Backend API URL.
         headers: Auth headers (X-API-Key or Authorization).
         gpu_model: Optional GPU SKU filter (e.g. "NVIDIA RTX 4090", "A100").
                    If None, picks the first available node.
         node_id: Specific node ID to deploy on (overrides gpu_model filter).
-    
+
     Returns:
         Tuple of (shared_secret: 32 bytes, client_pubkey: 32 bytes, agent_pubkey: 32 bytes, node_id: str).
     """
     ws_url = api_url.rstrip('/').replace("http://", "ws://").replace("https://", "wss://")
 
-    # ── Step 1: Find available sessions via REST ────────────────────────
+    # ── Step 1: Find available nodes ──────────────────────────────────
     nodes_resp = requests.get(
         f"{api_url.rstrip('/')}/nodes",
         headers=headers,
@@ -178,7 +178,6 @@ def perform_key_exchange(
         print("No available GPU nodes found.")
         sys.exit(1)
 
-    # If a specific node_id is given, find it directly
     if node_id:
         node = next((n for n in nodes if n.get("node_id") == node_id), None)
         if not node:
@@ -186,7 +185,6 @@ def perform_key_exchange(
             sys.exit(1)
         print(f"Selected GPU node: {node_id} ({node.get('gpu_model', '?')})")
     else:
-        # Filter by GPU SKU if requested
         if gpu_model:
             gpu_lower = gpu_model.lower()
             filtered = [
@@ -201,8 +199,6 @@ def perform_key_exchange(
                 sys.exit(1)
             nodes = filtered
             print(f"Filtered to {len(nodes)} node(s) matching GPU '{gpu_model}'")
-
-        # Pick the first online node
         node = nodes[0]
 
     node_id = node.get("node_id")
@@ -212,40 +208,48 @@ def perform_key_exchange(
     client_keypair = EphemeralKeyPair.generate()
     client_pub_b64 = client_keypair.public_key_b64
 
-    # ── Step 3: Discover agent's signaling session ────────────────────
+    # ── Step 3: Retry signaling (agent WS may reconnect) ───────────────
+    max_attempts = 3
     session_id = None
     agent_pub_bytes = None
     shared_secret = None
 
-    # Look up the active session for this node via the new endpoint
-    try:
-        sess_resp = requests.get(
-            f"{api_url.rstrip('/')}/signal/session-for-node",
-            params={"node_id": node_id},
-            headers=headers,
-            timeout=10,
-        )
-        if sess_resp.ok:
-            sess_data = sess_resp.json()
-            session_id = sess_data.get("session_id")
-    except Exception:
-        pass
+    for attempt in range(max_attempts):
+        session_id = None
 
-    if session_id:
-        # ── Step 3a: WebSocket signaling with correct session UUID ────
+        # Look up the active session for this node
+        try:
+            sess_resp = requests.get(
+                f"{api_url.rstrip('/')}/signal/session-for-node",
+                params={"node_id": node_id},
+                headers=headers,
+                timeout=10,
+            )
+            if sess_resp.ok:
+                sess_data = sess_resp.json()
+                session_id = sess_data.get("session_id")
+        except Exception:
+            pass
+
+        if not session_id:
+            if attempt < max_attempts - 1:
+                wait = 2 * (attempt + 1)
+                print(f"No active signaling session for node (attempt {attempt+1}/{max_attempts}), retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+            else:
+                break
+
+        # ── Step 3a: WebSocket signaling ──────────────────────────────
         if HAS_WS:
             try:
                 with ws_client.connect(f"{ws_url}/signal/client?session={session_id}",
                                         close_timeout=10) as ws:
-                    # Receive TeeQuote from matchmaker (pushed by agent)
                     raw = ws.recv(timeout=15)
                     msg = json.loads(raw)
                     if msg.get("type") == "tee_quote":
                         quote = TeeQuote.deserialize(json.loads(msg["payload"]))
-                    elif msg.get("type") == "tee_quote":
-                        quote = TeeQuote.deserialize(msg["payload"])
 
-                    # Verify the TEE quote
                     print("Verifying agent TEE attestation quote...")
                     report_data = quote.report_data
                     agent_pub_bytes = report_data[:32]
@@ -253,63 +257,69 @@ def perform_key_exchange(
                     verify_tee_quote(quote, agent_pub_bytes)
                     print("TEE quote verified successfully")
 
-                    # Compute ECDH shared secret (LOCAL ONLY)
                     shared_secret = compute_shared_secret(
                         client_keypair.private_key, agent_pub_bytes
                     )
 
-                    # Send our pubkey back
                     ws.send(json.dumps({
                         "type": "client_pub_key",
                         "payload": {"pub_key": client_pub_b64},
                     }))
                     print("Client pubkey sent via WebSocket signaling")
+                    break
 
             except Exception as e:
-                print(f"WebSocket signaling failed, falling back to REST: {e}")
+                print(f"WebSocket signaling failed (attempt {attempt+1}/{max_attempts}): {e}")
 
-        # ── Step 3b: REST fallback with correct session UUID ──────────
+        # ── Step 3b: REST fallback ────────────────────────────────────
         if shared_secret is None:
-            print("Falling back to REST signaling...")
-            session_resp = requests.get(
-                f"{api_url.rstrip('/')}/signal/session?session={session_id}",
-                headers=headers,
-                timeout=10,
-            )
-            if session_resp.ok:
-                session_data = session_resp.json()
-                quote_data = session_data.get("quote")
-                if quote_data:
-                    quote = TeeQuote.deserialize(quote_data)
-                    report_data = quote.report_data
-                    agent_pub_bytes = report_data[:32]
+            try:
+                session_resp = requests.get(
+                    f"{api_url.rstrip('/')}/signal/session?session={session_id}",
+                    headers=headers,
+                    timeout=10,
+                )
+                if session_resp.ok:
+                    session_data = session_resp.json()
+                    quote_data = session_data.get("quote")
+                    if quote_data:
+                        quote = TeeQuote.deserialize(quote_data)
+                        report_data = quote.report_data
+                        agent_pub_bytes = report_data[:32]
 
-                    verify_tee_quote(quote, agent_pub_bytes)
-                    print("TEE quote verified successfully (REST)")
+                        verify_tee_quote(quote, agent_pub_bytes)
+                        print("TEE quote verified successfully (REST)")
 
-                    shared_secret = compute_shared_secret(
-                        client_keypair.private_key, agent_pub_bytes
-                    )
+                        shared_secret = compute_shared_secret(
+                            client_keypair.private_key, agent_pub_bytes
+                        )
 
-                    # Post our pubkey
-                    key_resp = requests.post(
-                        f"{api_url.rstrip('/')}/signal/client-key?session={session_id}",
-                        headers=headers,
-                        json={"pub_key": client_pub_b64},
-                        timeout=10,
-                    )
+                        requests.post(
+                            f"{api_url.rstrip('/')}/signal/client-key?session={session_id}",
+                            headers=headers,
+                            json={"pub_key": client_pub_b64},
+                            timeout=10,
+                        )
+                        break
+            except Exception:
+                pass
 
-    # ── Step 5: Fallback if all signaling fails ─────────────────────────
+        if shared_secret is None and attempt < max_attempts - 1:
+            wait = 2 * (attempt + 1)
+            print(f"Signaling failed, retrying in {wait}s...")
+            time.sleep(wait)
+
+    # ── Step 4: Error out if signaling failed ─────────────────────────
     if shared_secret is None:
-        print("WARNING: Signaling endpoints unavailable, using local ECDH simulation")
-        agent_keypair = EphemeralKeyPair.generate()
-        agent_pub_bytes = agent_keypair.public_key_bytes
-        shared_secret = compute_shared_secret(
-            client_keypair.private_key, agent_pub_bytes
-        )
+        print("ERROR: Could not establish secure signaling with agent.")
+        print("  Possible causes:")
+        print("  - The edge agent is not running or has disconnected")
+        print("  - The agent's WebSocket connection dropped (check agent logs)")
+        print("  - Network/firewall is blocking WebSocket connections")
+        print("  Set NODE_ID env var on the agent to a fixed value for stability")
+        sys.exit(1)
 
     assert agent_pub_bytes is not None
-    assert shared_secret is not None
 
     print("ECDH key exchange complete (matchmaker never saw shared secret)")
     return shared_secret, client_keypair.public_key_bytes, agent_pub_bytes, node_id
@@ -339,6 +349,7 @@ def cmd_run(
     timeout: int = 600,
     gpu_model: str | None = None,
     node_id: str | None = None,
+    presign_ttl: int | None = None,
 ):
     cfg = _config()
     api_url = api_url or cfg.get("api_url")
@@ -390,14 +401,18 @@ def cmd_run(
         # We do NOT send the key to the matchmaker. We send only the salt.
         presign_url = f"{api_url.rstrip('/')}/presign"
         print(f"Requesting upload URL from {presign_url}")
+        presign_body = {
+            "job_id": "",
+            "enc_key_b64": "",  # Intentionally empty — zero-knowledge
+        }
+        if presign_ttl is not None and presign_ttl > 0:
+            presign_body["ttl_seconds"] = presign_ttl
+            print(f"  Presigned URL TTL: {presign_ttl}s")
         try:
             r = requests.post(
                 presign_url,
                 headers=headers,
-                json={
-                    "job_id": "",
-                    "enc_key_b64": "",  # Intentionally empty — zero-knowledge
-                },
+                json=presign_body,
                 timeout=10,
             )
             r.raise_for_status()

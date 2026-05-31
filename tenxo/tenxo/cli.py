@@ -59,6 +59,12 @@ def main():
         "--node-id",
         help="Specific node ID to deploy on (overrides --gpu filter)",
     )
+    run_p.add_argument(
+        "--presign-ttl",
+        type=int,
+        default=None,
+        help="Presigned URL TTL in seconds (default: SDK default ~15min)",
+    )
 
     args = parser.parse_args()
 
@@ -69,7 +75,7 @@ def main():
     elif args.command == "list":
         cmd_list(args.api_url, args.api_key)
     elif args.command == "run":
-        cmd_run(args.path, args.api_url, args.api_key, args.timeout, args.gpu_model, args.node_id)
+        cmd_run(args.path, args.api_url, args.api_key, args.timeout, args.gpu_model, args.node_id, args.presign_ttl)
     else:
         parser.print_help()
         sys.exit(1)

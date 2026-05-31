@@ -87,8 +87,9 @@ type NodeInfo struct {
 }
 
 type PresignRequest struct {
-	EncKeyB64 string `json:"enc_key_b64,omitempty"`
-	JobID     string `json:"job_id,omitempty"`
+	EncKeyB64  string `json:"enc_key_b64,omitempty"`
+	JobID      string `json:"job_id,omitempty"`
+	TTLSeconds int64  `json:"ttl_seconds,omitempty"`
 }
 
 type PresignResponse struct {
@@ -545,7 +546,7 @@ func (s *Server) r2Client(ctx context.Context) (*s3.Client, string, error) {
 	return client, bucket, nil
 }
 
-func (s *Server) getUploadURLs(ctx context.Context, jobID string) (uploadURL, resultUploadURL, resultURL string, err error) {
+func (s *Server) getUploadURLs(ctx context.Context, jobID string, ttl time.Duration) (uploadURL, resultUploadURL, resultURL string, err error) {
 	client, bucket, err := s.r2Client(ctx)
 	public := getEnv("PUBLIC_API_URL", "http://localhost:8080")
 	if err != nil {
@@ -554,7 +555,12 @@ func (s *Server) getUploadURLs(ctx context.Context, jobID string) (uploadURL, re
 	if client != nil {
 		uploadKey := fmt.Sprintf("jobs/%s.enc", jobID)
 		resultKey := fmt.Sprintf("results/%s.enc", jobID)
-		presigner := s3.NewPresignClient(client)
+		var presigner *s3.PresignClient
+		if ttl > 0 {
+			presigner = s3.NewPresignClient(client, s3.WithPresignExpires(ttl))
+		} else {
+			presigner = s3.NewPresignClient(client)
+		}
 
 		putReq, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: &bucket, Key: &uploadKey})
 
@@ -1010,8 +1016,10 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 	// Server-generated jobID — client-provided ID is ignored to prevent hijacking
 	jobID := fmt.Sprintf("job-%s", uuid.New().String()[:8])
 
+	ttl := time.Duration(req.TTLSeconds) * time.Second
+
 	ctx := context.Background()
-	uploadURL, resultUploadURL, resultURL, err := s.getUploadURLs(ctx, jobID)
+	uploadURL, resultUploadURL, resultURL, err := s.getUploadURLs(ctx, jobID, ttl)
 	if err != nil {
 		http.Error(w, "failed to create presigned URLs: "+err.Error(), http.StatusInternalServerError)
 		return
