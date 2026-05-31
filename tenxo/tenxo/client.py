@@ -454,7 +454,10 @@ def cmd_run(
         if resp.status_code not in (200, 201, 202):
             print(f"Failed to submit job: {resp.status_code} {resp.text}")
             sys.exit(1)
-        print("Job submitted. Polling for result...")
+        job_submit = resp.json()
+        # Backend generates its own job_id (ignores client-provided one)
+        job_id = job_submit.get("job_id", job_id)
+        print(f"Job submitted. Polling for result... (job_id: {job_id})")
 
         # ── Step 8: Poll for result ────────────────────────────────────
         status_url = f"{api_url.rstrip('/')}/jobs/{job_id}/status"

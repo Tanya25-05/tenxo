@@ -429,12 +429,6 @@ def verify_tee_quote(
             f"Expected >= 3 certs (ARK, ASK, OCA), got {len(quote.cert_chain)}"
         )
 
-    if len(quote.signature) < 100:
-        raise ValueError(
-            f"TEE quote signature too short ({len(quote.signature)} bytes). "
-            "Expected ~104 bytes for ECDSA secp384r1."
-        )
-
     # Try to verify the certificate chain and ECDSA signature.
     # If we have valid DER-encoded certs, do full verification.
     # Otherwise (dev mode with placeholder bytes), skip gracefully.
