@@ -707,6 +707,11 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	subject := "jobs"
 	if payload.NodeID != "" {
 		subject = "jobs." + payload.NodeID
+		// Verify agent has an active WebSocket session before publishing
+		if _, ok := signalStore.GetSessionByNodeID(payload.NodeID); !ok {
+			http.Error(w, "node not connected: "+payload.NodeID+". Ensure the edge agent is running and has registered.", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	_, err = s.js.Publish(subject, msgData)
 	if err != nil {
