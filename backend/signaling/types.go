@@ -315,14 +315,16 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ss.DeleteSession(sessionID)
-
 	// ── Step 7: Persistent bridge mode: WS ↔ NATS ────────────────────
 	// After key exchange, the WebSocket stays open and acts as a NATS
 	// proxy for this agent. This avoids exposing the NATS port to the
 	// internet — agents communicate entirely through port 8080.
+	// NOTE: session is NOT deleted here; it stays in the store during
+	// bridge mode so POST /jobs can verify the agent is connected via
+	// GetSessionByNodeID. It is cleaned up when the agent disconnects.
 	if ss.nc == nil {
 		log.Printf("signaling: no NATS available, closing agent WS %s", sessionID)
+		ss.DeleteSession(sessionID)
 		return
 	}
 
@@ -354,6 +356,7 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		if sub != nil {
 			sub.Unsubscribe()
 		}
+		ss.DeleteSession(sessionID)
 	}()
 
 	for {
