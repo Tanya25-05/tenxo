@@ -65,6 +65,8 @@ type Store interface {
 	Migrate(ctx context.Context) error
 
 	SetNode(ctx context.Context, nodeID, status, owner, gpuModel string, gpuVRAMMB int) error
+	SetNodeStatus(ctx context.Context, nodeID, status string) error
+	SetNodeStatusIf(ctx context.Context, nodeID, status, expectedCurrent string) error
 	SetNodeTEE(ctx context.Context, nodeID string) error
 	GetNode(ctx context.Context, nodeID string) (status string, err error)
 	GetAllNodes(ctx context.Context) (map[string]*NodeInfo, error)

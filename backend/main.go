@@ -182,6 +182,7 @@ func main() {
 	// Zero-knowledge key exchange signaling (routes only, never inspects keys)
 	RegisterSignalingRoutes(http.DefaultServeMux)
 	signalStore.SetNATS(nc)
+	signalStore.SetStore(srv.st)
 
 	// API Key management
 	http.HandleFunc("/api/keys", cors(srv.authMiddleware(srv.handleAPIKeys)))
@@ -719,6 +720,11 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Mark the node as busy — it is now running a job
+	if payload.NodeID != "" {
+		s.st.SetNodeStatus(ctx, payload.NodeID, "busy")
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "queued", "job_id": jobID, "subject": subject})
@@ -745,6 +751,9 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 
 	nodes := make([]NodeInfo, 0, len(nodeMap))
 	for _, n := range nodeMap {
+		if n.Status != "idle" {
+			continue
+		}
 		nodes = append(nodes, NodeInfo{
 			NodeID:        n.NodeID,
 			Status:        n.Status,

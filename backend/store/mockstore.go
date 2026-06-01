@@ -33,7 +33,12 @@ func (m *MockStore) SetNode(ctx context.Context, nodeID, status, owner, gpuModel
 	defer m.mu.Unlock()
 	existing, ok := m.nodes[nodeID]
 	if ok {
-		existing.Status = status
+		// Preserve reserved/busy status from heartbeats
+		if status == "idle" && existing.Status != "idle" && existing.Status != "" {
+			// Don't overwrite reserved/busy with idle
+		} else {
+			existing.Status = status
+		}
 		existing.Owner = owner
 		if gpuModel != "" {
 			existing.GPUModel = gpuModel
@@ -49,6 +54,24 @@ func (m *MockStore) SetNode(ctx context.Context, nodeID, status, owner, gpuModel
 			GPUModel:  gpuModel,
 			GPUVRAMMB: gpuVRAMMB,
 		}
+	}
+	return nil
+}
+
+func (m *MockStore) SetNodeStatus(ctx context.Context, nodeID, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n, ok := m.nodes[nodeID]; ok {
+		n.Status = status
+	}
+	return nil
+}
+
+func (m *MockStore) SetNodeStatusIf(ctx context.Context, nodeID, status, expectedCurrent string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n, ok := m.nodes[nodeID]; ok && n.Status == expectedCurrent {
+		n.Status = status
 	}
 	return nil
 }

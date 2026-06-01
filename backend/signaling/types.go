@@ -35,6 +35,7 @@
 package signaling
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -46,6 +47,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/gpu-grid/matchmaker/store"
 	"github.com/nats-io/nats.go"
 )
 
@@ -96,10 +98,15 @@ type SessionStore struct {
 	sessions map[string]*Session
 	upgrader websocket.Upgrader
 	nc       *nats.Conn
+	st       store.Store
 }
 
 func (ss *SessionStore) SetNATS(nc *nats.Conn) {
 	ss.nc = nc
+}
+
+func (ss *SessionStore) SetStore(st store.Store) {
+	ss.st = st
 }
 
 // NewSessionStore creates a new session store with a WebSocket upgrader.
@@ -254,6 +261,8 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 	session.AgentConn = conn
 	session.AgentQuote = &quote
 	session.ChallengeNonce = challenge
+	// Clean up session when this handler exits (bridge mode done or error)
+	defer ss.DeleteSession(sessionID)
 
 	log.Printf("signaling: agent session created: %s", sessionID)
 
@@ -266,7 +275,6 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 	})
 	if err := conn.WriteMessage(websocket.TextMessage, sessionResp); err != nil {
 		log.Printf("signaling: agent send session failed: %v", err)
-		ss.DeleteSession(sessionID)
 		return
 	}
 
@@ -278,13 +286,11 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 	_, raw, err = conn.ReadMessage()
 	if err != nil {
 		log.Printf("signaling: agent read register failed (%s): %v", sessionID, err)
-		ss.DeleteSession(sessionID)
 		return
 	}
 	var regMsg WSMessage
 	if err := json.Unmarshal(raw, &regMsg); err != nil {
 		log.Printf("signaling: agent bad register message (%s): %v", sessionID, err)
-		ss.DeleteSession(sessionID)
 		return
 	}
 	if regMsg.Type == "register" {
@@ -297,7 +303,6 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		log.Printf("signaling: agent expected register, got %s (%s)", regMsg.Type, sessionID)
-		ss.DeleteSession(sessionID)
 		return
 	}
 
@@ -311,11 +316,28 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("signaling: key exchange complete for session %s", sessionID)
 	case <-time.After(5 * time.Minute):
 		log.Printf("signaling: key exchange timed out for session %s", sessionID)
-		ss.DeleteSession(sessionID)
 		return
 	}
 
-	ss.DeleteSession(sessionID)
+	// ── Step 6b: Reserve the node — hide from dashboard ──────────────
+	// After successful key exchange, mark node as reserved so other
+	// developers don't see it. A 5-minute timeout releases it if the
+	// CLI fails to submit a job (encryption/upload failure, crash, etc.).
+	if ss.st != nil && session.NodeID != "" {
+		nodeID := session.NodeID
+		ss.st.SetNodeStatus(context.Background(), nodeID, "reserved")
+		log.Printf("signaling: node %s reserved for job submission", nodeID)
+
+		// Auto-release reservation after 5 minutes — only if still
+		// reserved (i.e. handleJobs didn't already set it to busy).
+		go func() {
+			time.Sleep(5 * time.Minute)
+			if ss.st != nil {
+				ss.st.SetNodeStatusIf(context.Background(), nodeID, "idle", "reserved")
+				log.Printf("signaling: reservation expired for node %s", nodeID)
+			}
+		}()
+	}
 
 	// ── Step 7: Persistent bridge mode: WS ↔ NATS ────────────────────
 	// After key exchange, the WebSocket stays open and acts as a NATS
@@ -354,6 +376,10 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		if sub != nil {
 			sub.Unsubscribe()
 		}
+		if ss.st != nil && nodeID != "" {
+			ss.st.SetNodeStatus(context.Background(), nodeID, "idle")
+			log.Printf("signaling: node %s returned to idle (bridge exit)", nodeID)
+		}
 	}()
 
 	for {
@@ -380,6 +406,10 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 			}
 		case "result":
 			ss.nc.Publish("jobs.results", wsMsg.Payload)
+			if ss.st != nil && nodeID != "" {
+				ss.st.SetNodeStatus(context.Background(), nodeID, "idle")
+				log.Printf("signaling: node %s returned to idle (result)", nodeID)
+			}
 		default:
 			log.Printf("signaling: unknown WS message type from agent (%s): %s", sessionID, wsMsg.Type)
 		}
