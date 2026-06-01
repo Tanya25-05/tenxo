@@ -11,9 +11,11 @@ services:
   # ─── Infrastructure ──────────────────────────────────────────────────────
   nats:
     image: nats:2.10.3
+    # NATS ports are internal (matchmaker connects via Docker DNS nats:4222).
+    # Do not expose publicly — HTTP requests to NATS port cause parser errors.
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
     volumes:
       - ../backend/configs/nats.conf:/etc/nats/nats-server.conf:ro
       - nats-data:/data
