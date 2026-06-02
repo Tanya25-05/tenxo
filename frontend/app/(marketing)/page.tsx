@@ -16,14 +16,14 @@ import {
 const stats = [
   { value: "$0.15/hr", label: "Average GPU cost", border: "border-blue-500/15", bg: "bg-blue-500/[0.04]", text: "text-blue-300" },
   { value: "<100ms", label: "Match latency", border: "border-cyan-500/15", bg: "bg-cyan-500/[0.04]", text: "text-cyan-300" },
-  { value: "AES-256", label: "End-to-end encryption", border: "border-accent-purple/15", bg: "bg-accent-purple/[0.04]", text: "text-accent-purple" },
-  { value: "SEV-SNP", label: "TEE attestation", border: "border-emerald-500/15", bg: "bg-emerald-500/[0.04]", text: "text-emerald-300" },
+  { value: "Zero-trust", label: "Your data stays yours", border: "border-accent-purple/15", bg: "bg-accent-purple/[0.04]", text: "text-accent-purple" },
+  { value: "Hardware-secured", label: "TEE-powered execution", border: "border-emerald-500/15", bg: "bg-emerald-500/[0.04]", text: "text-emerald-300" },
 ];
 
 const features = [
   {
-    title: "Zero-Knowledge Encryption",
-    desc: "Payloads are encrypted end-to-end with AES-256-GCM. The matchmaker routes ECDH key material without ever possessing the plaintext key.",
+    title: "End-to-End Encryption",
+    desc: "Your code and data are encrypted before they leave your machine. Only the GPU agent can decrypt them — the platform never sees your plaintext.",
     icon: Lock,
     tint: "purple" as const,
     border: "border-accent-purple/20",
@@ -33,7 +33,7 @@ const features = [
   },
   {
     title: "GPU Marketplace",
-    desc: "NATS-powered matchmaker connects clients to idle GPUs. No centralized queue, no single point of failure.",
+    desc: "Idle GPUs from around the world are matched to your workload in milliseconds. No queues, no waiting for cluster time.",
     icon: Globe,
     tint: "blue" as const,
     border: "border-blue-500/20",
@@ -42,8 +42,8 @@ const features = [
     big: false,
   },
   {
-    title: "TEE Attestation",
-    desc: "Every GPU agent provides a hardware-backed attestation quote (AMD SEV-SNP / Intel TDX) verified against the AMD root of trust.",
+    title: "Hardware Attestation",
+    desc: "Every GPU runs inside a hardware-protected environment. You get a verifiable proof that your code ran securely, on real hardware.",
     icon: Shield,
     tint: "orange" as const,
     border: "border-orange-500/20",
@@ -53,7 +53,7 @@ const features = [
   },
   {
     title: "CLI & SDKs",
-    desc: "TypeScript SDK and CLI for job submission, key management, and real-time log streaming. One command to deploy.",
+    desc: "Deploy with one command. TypeScript SDK and CLI handle packaging, encryption, and submission. Stream logs in real time.",
     icon: Terminal,
     tint: "cyan" as const,
     border: "border-cyan-500/20",
@@ -63,7 +63,7 @@ const features = [
   },
   {
     title: "Per-Second Billing",
-    desc: "Pay only for what you use. Auto-charge triggers at $1 threshold with saved card or UPI. No reservations, no minimums.",
+    desc: "Pay only for what you use. Auto-charge triggers at $1 with saved card or UPI. No reservations, no minimums.",
     icon: DollarSign,
     tint: "emerald" as const,
     border: "border-emerald-500/20",
@@ -83,11 +83,11 @@ const gpuTiers = [
 ];
 
 const timeline = [
-  { year: "Connect", title: "Client submits encrypted job", desc: "AES-256-GCM payload is uploaded to ephemeral storage. Only the client holds the key." },
-  { year: "Match", title: "Matchmaker routes via NATS", desc: "Zero-knowledge ECDH key material is relayed to an available GPU agent. The matchmaker sees only blinded values." },
-  { year: "Attest", title: "Agent verifies in TEE", desc: "The agent checks the client payload inside a Trusted Execution Environment. Docker sandbox enforces --network none." },
-  { year: "Execute", title: "GPU processes the workload", desc: "Training, inference, or rendering runs with full GPU passthrough inside the TEE boundary." },
-  { year: "Return", title: "Results re-encrypted and returned", desc: "Output is encrypted with the same AES key before leaving the TEE. Client downloads and decrypts locally." },
+  { year: "Connect", title: "Package and encrypt your workload", desc: "Your code and data are encrypted locally and uploaded. Only the GPU running your job can decrypt them." },
+  { year: "Match", title: "Find an available GPU", desc: "The platform routes your encrypted workload to an idle GPU. Your data stays encrypted the entire time." },
+  { year: "Attest", title: "Verify the hardware", desc: "The GPU agent proves it's running inside a tamper-proof environment before your code ever arrives." },
+  { year: "Execute", title: "Run on remote hardware", desc: "Training, inference, or rendering runs with full GPU acceleration. Network and data are locked down." },
+  { year: "Return", title: "Get encrypted results back", desc: "Results are encrypted before leaving the GPU. You download and decrypt them on your machine." },
 ];
 
 export default function LandingPage() {
@@ -108,8 +108,7 @@ export default function LandingPage() {
             </span>
           </h1>
           <p className="mx-auto mt-4 max-w-xl text-[15px] leading-relaxed text-text-secondary">
-            Network idle distributed GPUs into a zero-trust compute grid. AI training, fine-tuning, and inference on
-            hardware you don&apos;t own — without ever exposing your data.
+            Tap into idle GPUs around the world for AI training, fine-tuning, and inference. Your code and data stay encrypted — only the GPU running your job can see them.
           </p>
           <div className="mt-8 flex items-center justify-center gap-3">
             <Link href="/signup">
@@ -153,7 +152,7 @@ export default function LandingPage() {
             Zero-knowledge by design
           </h2>
           <p className="mx-auto mt-3 max-w-lg text-[14px] text-text-secondary">
-            The matchmaker relays encrypted key material between client and agent without ever seeing the plaintext.
+            Your data is encrypted before it leaves your machine. The platform only routes work to GPUs — it never sees your code or data.
           </p>
         </div>
 
@@ -161,20 +160,20 @@ export default function LandingPage() {
           <div className="grain relative rounded-xl border border-white/[0.08] bg-white/[0.01]">
             <div className="grid grid-cols-3">
               <div className="border-b border-r border-white/[0.08] p-4 text-center text-[11px] font-semibold uppercase tracking-widest text-accent-purple">
-                Client
+                Your Machine
               </div>
               <div className="border-b border-r border-white/[0.08] p-4 text-center text-[11px] font-semibold uppercase tracking-widest text-zinc-500">
-                Matchmaker
+                Tenxo Cloud
               </div>
               <div className="border-b border-white/[0.08] p-4 text-center text-[11px] font-semibold uppercase tracking-widest text-accent-neon">
-                GPU Agent (TEE)
+                GPU Agent
               </div>
               <div className="border-b border-r border-white/[0.08] p-5">
                 <div className="flex size-8 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
                   <Lock className="size-4 text-accent-purple" />
                 </div>
-                <p className="mt-3 text-[13px] font-medium text-text-primary">Encrypt payload</p>
-                <p className="mt-1 text-[12px] text-text-tertiary">AES-256-GCM with ephemeral key</p>
+                <p className="mt-3 text-[13px] font-medium text-text-primary">Encrypt your workload</p>
+                <p className="mt-1 text-[12px] text-text-tertiary">Your machine locks it before sending</p>
               </div>
               <div className="relative border-b border-r border-white/[0.08] p-5">
                 <svg className="absolute left-0 top-1/2 -translate-x-1/2 -translate-y-1/2" width="24" height="24" viewBox="0 0 24 24" fill="none">
@@ -183,22 +182,22 @@ export default function LandingPage() {
                 <div className="flex size-8 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
                   <Users className="size-4 text-zinc-400" />
                 </div>
-                <p className="mt-3 text-[13px] font-medium text-text-primary">Relay key material</p>
-                <p className="mt-1 text-[12px] text-text-tertiary">ECDH XOR &rarr; agent</p>
+                <p className="mt-3 text-[13px] font-medium text-text-primary">Route to a GPU</p>
+                <p className="mt-1 text-[12px] text-text-tertiary">Tenxo finds an available GPU for you</p>
               </div>
               <div className="border-b p-5">
                 <div className="flex size-8 items-center justify-center rounded-lg border border-accent-neon/20 bg-accent-neon/10">
                   <Shield className="size-4 text-accent-neon" />
                 </div>
-                <p className="mt-3 text-[13px] font-medium text-text-primary">Decrypt in TEE</p>
-                <p className="mt-1 text-[12px] text-text-tertiary">Key derived via HKDF inside SEV-SNP</p>
+                <p className="mt-3 text-[13px] font-medium text-text-primary">Decrypt and run</p>
+                <p className="mt-1 text-[12px] text-text-tertiary">GPU unlocks your workload in a secure zone</p>
               </div>
               <div className="border-r border-white/[0.08] p-5">
                 <div className="flex size-8 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
                   <Cpu className="size-4 text-accent-purple" />
                 </div>
-                <p className="mt-3 text-[13px] font-medium text-text-primary">Submit job</p>
-                <p className="mt-1 text-[12px] text-text-tertiary">POST /jobs with encrypted link</p>
+                <p className="mt-3 text-[13px] font-medium text-text-primary">Submit the job</p>
+                <p className="mt-1 text-[12px] text-text-tertiary">A single command deploys your workload</p>
               </div>
               <div className="relative border-r border-white/[0.08] p-5">
                 <svg className="absolute left-0 top-1/2 -translate-x-1/2 -translate-y-1/2" width="24" height="24" viewBox="0 0 24 24" fill="none">
@@ -207,15 +206,15 @@ export default function LandingPage() {
                 <div className="flex size-8 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
                   <Users className="size-4 text-zinc-400" />
                 </div>
-                <p className="mt-3 text-[13px] font-medium text-text-primary">Queue via NATS</p>
-                <p className="mt-1 text-[12px] text-text-tertiary">JetStream &rarr; available agent</p>
+                <p className="mt-3 text-[13px] font-medium text-text-primary">Queue the work</p>
+                <p className="mt-1 text-[12px] text-text-tertiary">The job waits until a GPU is ready</p>
               </div>
               <div className="p-5">
                 <div className="flex size-8 items-center justify-center rounded-lg border border-accent-neon/20 bg-accent-neon/10">
                   <Shield className="size-4 text-accent-neon" />
                 </div>
-                <p className="mt-3 text-[13px] font-medium text-text-primary">Execute in Docker</p>
-                <p className="mt-1 text-[12px] text-text-tertiary">--network none --cap-drop ALL</p>
+                <p className="mt-3 text-[13px] font-medium text-text-primary">Run in isolation</p>
+                <p className="mt-1 text-[12px] text-text-tertiary">Your workload is sandboxed with no network access</p>
               </div>
             </div>
           </div>
@@ -230,17 +229,17 @@ export default function LandingPage() {
             <pre className="flex-1 overflow-x-auto font-mono text-[12px] leading-[1.8]">
               <span className="text-green-400">$</span> tenxo run --gpu RTX4090 -n pytorch:24.03 {"\n"}
               <span className="text-emerald-400">✓</span>{" "}
-              <span className="text-text-secondary">Encrypted payload</span>{" "}
-              <span className="text-text-tertiary">(AES-256-GCM)</span>{"\n"}
+              <span className="text-text-secondary">Workload encrypted</span>{" "}
+              <span className="text-text-tertiary">(locked on your machine)</span>{"\n"}
               <span className="text-emerald-400">✓</span>{" "}
-              <span className="text-text-secondary">Key material relayed</span>{" "}
-              <span className="text-text-tertiary">(ECDH via matchmaker)</span>{"\n"}
+              <span className="text-text-secondary">GPU located</span>{" "}
+              <span className="text-text-tertiary">(nearest available)</span>{"\n"}
               <span className="text-emerald-400">✓</span>{" "}
-              <span className="text-text-secondary">Agent attested</span>{" "}
-              <span className="text-text-tertiary">(AMD SEV-SNP ✓)</span>{"\n"}
+              <span className="text-text-secondary">Hardware verified</span>{" "}
+              <span className="text-text-tertiary">(tamper-proof ✓)</span>{"\n"}
               <span className="text-emerald-400">✓</span>{" "}
               <span className="text-text-secondary">Running on</span>{" "}
-              <span className="text-blue-300">RTX 4090 [TEE]</span>{"\n"}
+              <span className="text-blue-300">RTX 4090 [Secure Zone]</span>{"\n"}
               <span className="text-blue-400">$</span>{" "}
               <span className="text-text-tertiary animate-pulse">▊</span>
             </pre>
@@ -255,7 +254,7 @@ export default function LandingPage() {
             2.0 Workflow
           </p>
           <h2 className="mt-3 text-3xl font-semibold tracking-tight text-text-primary">
-            From encrypted payload to result
+            How it works
           </h2>
         </div>
 
@@ -316,15 +315,15 @@ export default function LandingPage() {
                   <p className="mt-2 max-w-md text-[13px] leading-relaxed text-text-secondary">{f.desc}</p>
                   <div className="mt-6 flex items-center gap-1.5 text-[12px] text-text-tertiary">
                     <div className={`size-1.5 rounded-full ${f.text}`} />
-                    AES-256-GCM + HKDF-SHA256
+                    industry-standard encryption
                   </div>
                   <div className="mt-1.5 flex items-center gap-1.5 text-[12px] text-text-tertiary">
                     <div className={`size-1.5 rounded-full ${f.text}`} />
-                    ECDH key exchange via matchmaker
+                    Secure key exchange via relay
                   </div>
                   <div className="mt-1.5 flex items-center gap-1.5 text-[12px] text-text-tertiary">
                     <div className={`size-1.5 rounded-full ${f.text}`} />
-                    Client-only decryption, zero server exposure
+                    Platform never sees your data
                   </div>
                 </div>
               );
@@ -357,7 +356,7 @@ export default function LandingPage() {
             Pay only for what you use
           </h2>
           <p className="mt-3 max-w-lg text-[14px] text-text-secondary">
-            No reservations, no commitments. Billed by the second with auto-charge settlement.
+            No reservations, no commitments. You only pay for the seconds you use.
           </p>
         </div>
 
@@ -401,8 +400,7 @@ export default function LandingPage() {
               </div>
               <h3 className="mt-5 text-lg font-semibold text-text-primary">For Developers</h3>
               <p className="mt-2 max-w-sm text-[13px] leading-relaxed text-text-secondary">
-                Get API keys, submit jobs, and monitor your workloads from the console or CLI. Full TypeScript SDK
-                included.
+                One command to deploy. Monitor your workloads from the console or CLI. Full SDK included.
               </p>
               <div className="mt-6 flex items-center gap-1.5 text-[13px] font-medium text-accent-purple transition-colors group-hover:text-accent-purple/80">
                 Open Console <ArrowUpRight className="size-3.5" />
@@ -417,8 +415,7 @@ export default function LandingPage() {
               </div>
               <h3 className="mt-5 text-lg font-semibold text-text-primary">For Providers</h3>
               <p className="mt-2 max-w-sm text-[13px] leading-relaxed text-text-secondary">
-                Monetize your idle GPU hardware. Earn per-second payouts with automatic monthly settlements. Zero-trust
-                security built-in.
+                Earn from your idle GPU. Per-second payouts with automatic monthly settlements. Security built in.
               </p>
               <div className="mt-6 flex items-center gap-1.5 text-[13px] font-medium text-accent-neon transition-colors group-hover:text-accent-neon/80">
                 Connect GPU <ArrowUpRight className="size-3.5" />
@@ -440,7 +437,7 @@ export default function LandingPage() {
             Ready to deploy on Tenxo?
           </h2>
           <p className="relative mx-auto mt-3 max-w-sm text-[14px] text-text-secondary">
-            Connect your GPU or deploy a workload in minutes. Zero-trust security, per-second billing.
+            Connect your GPU or deploy a workload in minutes. Your data stays encrypted, billing by the second.
           </p>
           <div className="relative mt-6 flex items-center justify-center gap-3">
             <Link href="/signup">
