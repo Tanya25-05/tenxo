@@ -46,13 +46,14 @@ func (s *PGStore) Close() {
 }
 
 func (s *PGStore) SetNode(ctx context.Context, nodeID, status, owner, gpuModel string, gpuVRAMMB int) error {
-	// Preserve reserved/busy status from heartbeats — only explicit
-	// calls via SetNodeStatus can change away from idle.
+	// Preserve busy status from heartbeats — only explicit calls via
+	// SetNodeStatus can change away from idle/busy. Reserved is transient
+	// and gets cleared by the next heartbeat (proves agent is alive).
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO nodes (node_id, status, owner, gpu_model, gpu_vram_mb, last_seen)
 		 VALUES ($1, $2, $3, $4, $5, NOW())
 		 ON CONFLICT (node_id) DO UPDATE SET
-		   status=CASE WHEN nodes.status='idle' OR nodes.status IS NULL THEN $2 ELSE nodes.status END,
+		   status=CASE WHEN nodes.status='busy' THEN nodes.status ELSE $2 END,
 		   owner=$3,
 		   gpu_model=CASE WHEN $4='' THEN nodes.gpu_model ELSE $4 END,
 		   gpu_vram_mb=CASE WHEN $5=0 THEN nodes.gpu_vram_mb ELSE $5 END,
