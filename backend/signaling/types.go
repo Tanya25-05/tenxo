@@ -284,6 +284,7 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 	// routed from HandleClientWS — we do NOT need to read it here.
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	_, raw, err = conn.ReadMessage()
+	conn.SetReadDeadline(time.Time{}) // clear deadline before bridge mode
 	if err != nil {
 		log.Printf("signaling: agent read register failed (%s): %v", sessionID, err)
 		return
@@ -348,7 +349,7 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nodeID := ""
+	nodeID := session.NodeID
 	var sub *nats.Subscription
 	subscribed := false
 
@@ -375,6 +376,27 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("signaling: agent %s entering bridge mode", sessionID)
 
+	// ── Step 7b: WebSocket keepalive ─────────────────────────────
+	// Use ping/pong to detect silent disconnects and prevent proxies
+	// from closing idle connections. The read deadline is extended on
+	// every successful read and on every pong from the peer.
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer pingTicker.Stop()
+
+	go func() {
+		for range pingTicker.C {
+			if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+				return
+			}
+		}
+	}()
+
 	defer func() {
 		if sub != nil {
 			sub.Unsubscribe()
@@ -386,6 +408,7 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	for {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("signaling: agent WS disconnected (%s): %v", sessionID, err)
