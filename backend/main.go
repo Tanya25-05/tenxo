@@ -94,6 +94,7 @@ type PresignRequest struct {
 
 type PresignResponse struct {
 	UploadURL       string `json:"upload_url"`
+	DownloadURL     string `json:"download_url"`
 	ResultUploadURL string `json:"result_upload_url"`
 	ResultURL       string `json:"result_url"`
 	JobID           string `json:"job_id"`
@@ -547,11 +548,11 @@ func (s *Server) r2Client(ctx context.Context) (*s3.Client, string, error) {
 	return client, bucket, nil
 }
 
-func (s *Server) getUploadURLs(ctx context.Context, jobID string, ttl time.Duration) (uploadURL, resultUploadURL, resultURL string, err error) {
+func (s *Server) getUploadURLs(ctx context.Context, jobID string, ttl time.Duration) (uploadURL, resultUploadURL, resultURL, downloadURL string, err error) {
 	client, bucket, err := s.r2Client(ctx)
 	public := getEnv("PUBLIC_API_URL", "http://localhost:8080")
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	if client != nil {
 		uploadKey := fmt.Sprintf("jobs/%s.enc", jobID)
@@ -564,25 +565,30 @@ func (s *Server) getUploadURLs(ctx context.Context, jobID string, ttl time.Durat
 		}
 
 		putReq, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: &bucket, Key: &uploadKey})
-
 		if err != nil {
-			return "", "", "", err
+			return "", "", "", "", err
 		}
 		resultPutReq, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: &bucket, Key: &resultKey})
 		if err != nil {
-			return "", "", "", err
+			return "", "", "", "", err
 		}
 		getReq, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &resultKey})
 		if err != nil {
-			return "", "", "", err
+			return "", "", "", "", err
 		}
-		return putReq.URL, resultPutReq.URL, getReq.URL, nil
+		// Presigned GET URL for the job payload — agent needs this to download
+		downloadGetReq, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &uploadKey})
+		if err != nil {
+			return "", "", "", "", err
+		}
+		return putReq.URL, resultPutReq.URL, getReq.URL, downloadGetReq.URL, nil
 	}
 
 	uploadURL = fmt.Sprintf("%s/storage/upload/%s", public, jobID)
+	downloadURL = uploadURL
 	resultUploadURL = fmt.Sprintf("%s/storage/result-upload/%s", public, jobID)
 	resultURL = fmt.Sprintf("%s/storage/result/%s", public, jobID)
-	return uploadURL, resultUploadURL, resultURL, nil
+	return uploadURL, resultUploadURL, resultURL, downloadURL, nil
 }
 
 // parseAndValidateToken parses a JWT token string and returns the parsed token after validation
@@ -656,6 +662,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		"status":     "queued",
 		"upload_url": jobLink,
 	}
+
 	if payload.GPUModel != "" {
 		updates["gpu_model"] = payload.GPUModel
 	}
@@ -676,9 +683,18 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		_ = s.st.JobSet(ctx, jobID, map[string]string{"result_upload_url": resultUploadURL})
 	}
 
+	// Use the presigned GET URL (download_url) for the agent instead of the
+	// presigned PUT URL (encrypted_job_link) — S3 presigned URLs are method-specific.
+	agentJobLink := jobLink
+	if payload.JobID != "" {
+		if dl, _ := s.st.JobGet(ctx, payload.JobID, "download_url"); dl != "" {
+			agentJobLink = dl
+		}
+	}
+
 	msg := map[string]string{
 		"job_id":             jobID,
-		"encrypted_job_link": jobLink,
+		"encrypted_job_link": agentJobLink,
 		"result_upload_url":  resultUploadURL,
 		"owner":              userID,
 	}
@@ -1033,23 +1049,25 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 	ttl := time.Duration(req.TTLSeconds) * time.Second
 
 	ctx := context.Background()
-	uploadURL, resultUploadURL, resultURL, err := s.getUploadURLs(ctx, jobID, ttl)
+	uploadURL, resultUploadURL, resultURL, downloadURL, err := s.getUploadURLs(ctx, jobID, ttl)
 	if err != nil {
 		http.Error(w, "failed to create presigned URLs: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	_ = s.st.JobSet(ctx, jobID, map[string]string{
-		"owner":             userID,
-		"status":            "created",
-		"upload_url":        uploadURL,
-		"result_upload_url": resultUploadURL,
-		"result_url":        resultURL,
-		"enc_key_b64":       keyB64,
+		"owner":              userID,
+		"status":             "created",
+		"upload_url":         uploadURL,
+		"download_url":       downloadURL,
+		"result_upload_url":  resultUploadURL,
+		"result_url":         resultURL,
+		"enc_key_b64":        keyB64,
 	})
 
 	resp := PresignResponse{
 		UploadURL:       uploadURL,
+		DownloadURL:     downloadURL,
 		ResultUploadURL: resultUploadURL,
 		ResultURL:       resultURL,
 		JobID:           jobID,
