@@ -418,6 +418,7 @@ def cmd_run(
             r.raise_for_status()
             pres = r.json()
             upload_url = pres["upload_url"]
+            download_url = pres.get("download_url", upload_url)
             result_url = pres.get("result_url")
             job_id = pres.get("job_id")
         except Exception as e:
@@ -438,7 +439,7 @@ def cmd_run(
         # ── Step 7: Submit job (salt only, NOT the AES key) ──────────
         job_post = {
             "job_id": job_id,
-            "encrypted_job_link": upload_url,
+            "encrypted_job_link": download_url,
             # ZERO-KNOWLEDGE: salt_b64 instead of enc_key_b64
             "salt_b64": salt_b64,
             # Include client pubkey so agent can verify the ECDH derivation
