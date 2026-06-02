@@ -370,6 +370,9 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("signaling: agent %s subscribed to jobs.%s", sessionID, nodeID)
 	}
 
+	// Clear the register read deadline — bridge mode blocks indefinitely
+	conn.SetReadDeadline(time.Time{})
+
 	log.Printf("signaling: agent %s entering bridge mode", sessionID)
 
 	defer func() {
