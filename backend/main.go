@@ -62,6 +62,8 @@ type JobRequest struct {
 	EncKeyB64               string `json:"enc_key_b64"`
 	SaltB64                 string `json:"salt_b64"`
 	GPUModel                string `json:"gpu_model"`
+	Script                  string `json:"script"`
+	Image                   string `json:"image"`
 	NodeID                  string `json:"node_id"`
 	WorkspaceID             string `json:"workspace_id,omitempty"`
 	EncryptedWorkspaceKeyB64 string `json:"encrypted_workspace_key_b64,omitempty"`
@@ -697,6 +699,12 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		"encrypted_job_link": agentJobLink,
 		"result_upload_url":  resultUploadURL,
 		"owner":              userID,
+	}
+	if payload.Script != "" {
+		msg["script"] = payload.Script
+	}
+	if payload.Image != "" {
+		msg["image"] = payload.Image
 	}
 	if payload.EncKeyB64 != "" {
 		msg["enc_key_b64"] = payload.EncKeyB64
@@ -1422,30 +1430,43 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) subscribeResults() {
 	sub, err := s.nc.Subscribe("jobs.results", func(msg *nats.Msg) {
 		var payload map[string]any
-		_ = json.Unmarshal(msg.Data, &payload)
+		if err := json.Unmarshal(msg.Data, &payload); err != nil {
+			log.Printf("subscribeResults: failed to parse result: %v", err)
+			return
+		}
 		jobID, _ := payload["job_id"].(string)
 		status, _ := payload["status"].(string)
 		resultURL, _ := payload["result_url"].(string)
 		ctx := context.Background()
-		if jobID != "" {
-			updates := map[string]string{}
-			if status != "" {
-				updates["status"] = status
-			}
-			if resultURL != "" {
-				updates["result_url"] = resultURL
-			}
-			if errMsg, ok := payload["error"].(string); ok && errMsg != "" {
-				updates["error"] = errMsg
-			}
-			if len(updates) > 0 {
-				_ = s.st.JobSet(ctx, jobID, updates)
-			}
-			owner, _ := s.st.JobGet(ctx, jobID, "owner")
-			if owner != "" {
-				s.sendWS(owner, string(msg.Data))
-			}
+		if jobID == "" {
+			log.Printf("subscribeResults: result with empty job_id: %s", string(msg.Data))
+			return
 		}
+		updates := map[string]string{}
+		if status != "" {
+			updates["status"] = status
+		}
+		if resultURL != "" {
+			updates["result_url"] = resultURL
+		}
+		switch e := payload["error"].(type) {
+		case string:
+			if e != "" {
+				updates["error"] = e
+			}
+		case nil:
+			// no error field, that's OK for "done" status
+		default:
+			updates["error"] = fmt.Sprintf("%v", e)
+		}
+		if len(updates) > 0 {
+			_ = s.st.JobSet(ctx, jobID, updates)
+		}
+		owner, _ := s.st.JobGet(ctx, jobID, "owner")
+		if owner != "" {
+			s.sendWS(owner, string(msg.Data))
+		}
+		log.Printf("subscribeResults: job %s → status=%s err=%v", jobID, status, updates["error"])
 	})
 	if err != nil {
 		log.Printf("failed to subscribe to jobs.results: %v", err)

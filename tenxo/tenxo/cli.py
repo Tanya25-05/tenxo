@@ -65,6 +65,16 @@ def main():
         default=None,
         help="Presigned URL TTL in seconds (default: SDK default ~15min)",
     )
+    run_p.add_argument(
+        "--script",
+        default="main.py",
+        help="Entrypoint script to run inside the container (default: main.py)",
+    )
+    run_p.add_argument(
+        "--image",
+        default=None,
+        help="Docker image to use (default: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime)",
+    )
 
     args = parser.parse_args()
 
@@ -75,7 +85,7 @@ def main():
     elif args.command == "list":
         cmd_list(args.api_url, args.api_key)
     elif args.command == "run":
-        cmd_run(args.path, args.api_url, args.api_key, args.timeout, args.gpu_model, args.node_id, args.presign_ttl)
+        cmd_run(args.path, args.api_url, args.api_key, args.timeout, args.gpu_model, args.node_id, args.presign_ttl, script=args.script, image=args.image)
     else:
         parser.print_help()
         sys.exit(1)

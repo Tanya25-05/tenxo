@@ -80,9 +80,11 @@ export default function MarketplacePage() {
 
   useEffect(() => {
     if (!session?.access_token) return;
+    const ac = new AbortController();
     async function fetchNodes() {
       try {
         const res = await fetch(`${API_URL}/nodes`, {
+          signal: ac.signal,
           headers: { Authorization: `Bearer ${session.access_token}` },
         });
         if (res.ok) {
@@ -91,13 +93,15 @@ export default function MarketplacePage() {
         } else {
           setNodes(MOCK_NODES);
         }
-      } catch {
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
         setNodes(MOCK_NODES);
       } finally {
         setLoading(false);
       }
     }
     fetchNodes();
+    return () => ac.abort();
   }, [session?.access_token]);
 
   const trackUsage = async (jobId: string, action: "start" | "stop") => {
@@ -389,7 +393,13 @@ export default function MarketplacePage() {
 
       {/* ─── CLI Deploy Dialog ─── */}
       {selectedNode && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Deploy to ${selectedNode.gpu_model}`}
+          onKeyDown={(e) => e.key === "Escape" && closeDialog()}
+        >
           <div className="w-full max-w-lg rounded-2xl border border-white/[0.08] bg-[#0c0c0f] p-6 shadow-2xl">
             <div className="mb-5 flex items-start justify-between">
               <div>

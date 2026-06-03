@@ -66,7 +66,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
-      <aside className="sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-white/[0.08] bg-surface/90 backdrop-blur-xl">
+      <aside aria-label="Sidebar navigation" className="sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-white/[0.08] bg-surface/90 backdrop-blur-xl">
         <div className="flex items-center gap-2.5 px-4 pt-4 pb-6">
           <div className="flex size-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
             <Logo size={20} gradient />
@@ -91,7 +91,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
         </div>
 
-        <nav className="flex-1 space-y-0.5 px-3">
+        <nav aria-label="App pages" className="flex-1 space-y-0.5 px-3">
           {navItems.map((item) => {
             const Icon = item.icon;
             const selected = pathname === item.path || pathname.startsWith(item.path + "/");
@@ -99,6 +99,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               <Link
                 key={item.name}
                 href={item.path}
+                aria-current={selected ? "page" : undefined}
                 className={cn(
                   "flex items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium transition-all duration-200",
                   selected

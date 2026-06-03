@@ -20,7 +20,7 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
             </span>
           </Link>
 
-          <nav className="hidden items-center gap-6 sm:flex">
+          <nav aria-label="Main navigation" className="hidden items-center gap-6 sm:flex">
             {navLinks.map((link) => (
               <Link
                 key={link.href}

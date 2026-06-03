@@ -492,9 +492,10 @@ export default function DeveloperDashboard() {
               API Bearer Token
             </label>
             <input
-              type="text"
+              type="password"
               readOnly
               value={session.access_token}
+              aria-label="API Bearer Token"
               className="mb-4 w-full rounded-lg border border-white/[0.08] bg-black/40 px-4 py-2.5 font-mono text-xs text-text-secondary outline-none focus:border-white/20"
             />
             <Button variant="primary" size="sm" onClick={handleCopyToken}>

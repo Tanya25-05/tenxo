@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://tenxo.ai/sitemap.xml

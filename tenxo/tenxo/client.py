@@ -350,6 +350,8 @@ def cmd_run(
     gpu_model: str | None = None,
     node_id: str | None = None,
     presign_ttl: int | None = None,
+    script: str = "main.py",
+    image: str | None = None,
 ):
     cfg = _config()
     api_url = api_url or cfg.get("api_url")
@@ -445,7 +447,10 @@ def cmd_run(
             # Include client pubkey so agent can verify the ECDH derivation
             "client_pub_key": __import__("base64").b64encode(client_pubkey).decode(),
             "node_id": node_id,
+            "script": script,
         }
+        if image is not None:
+            job_post["image"] = image
         print("Submitting job (zero-knowledge — AES key never sent)...")
         resp = requests.post(
             f"{api_url.rstrip('/')}/jobs",
