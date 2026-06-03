@@ -350,6 +350,25 @@ fn perform_key_exchange(
 
 // ─── Container Runtime (Docker / Kata) ──────────────────────────────────────
 
+fn docker_has_gpu_support() -> bool {
+    // Check nvidia-smi first (drivers loaded)
+    if Command::new("nvidia-smi").output().is_err() {
+        return false;
+    }
+    // Then check Docker has the nvidia runtime registered
+    Command::new("docker")
+        .args(["info", "--format", "{{.Runtimes}}"])
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() {
+            let s = String::from_utf8_lossy(&o.stdout);
+            Some(s.contains("nvidia"))
+        } else {
+            Some(false)
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RuntimeKind {
     Docker,
@@ -405,8 +424,13 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value) 
             }
         }
         RuntimeKind::Docker => {
-            docker_args.push("--gpus".to_string());
-            docker_args.push("all".to_string());
+            if docker_has_gpu_support() {
+                docker_args.push("--gpus".to_string());
+                docker_args.push("all".to_string());
+                println!("Docker: GPU passthrough enabled via --gpus all");
+            } else {
+                println!("Docker: nvidia-container-toolkit not detected — running without GPU");
+            }
         }
     }
 
