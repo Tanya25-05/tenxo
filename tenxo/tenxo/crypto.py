@@ -43,6 +43,7 @@ NONCE_SIZE = 12
 SALT_SIZE = 32
 SEED_SIZE = 32
 TAG_SIZE = 16
+PADDING_TRAILER_SIZE = 8
 
 # Plausible deniability: payload is padded to one of these sizes (in bytes)
 # Tiers are ordered from smallest to largest for efficient selection.
@@ -240,9 +241,8 @@ def pad_payload(data: bytes) -> Tuple[bytes, int]:
     """Pad payload to the nearest standard tier with CSPRNG bytes.
     
     The padding scheme is:
-      [original_data] [CSPRNG pad bytes] [1-byte pad_len]
+      [original_data] [CSPRNG pad bytes] [8-byte big-endian original_size]
     
-    Where pad_len = padded_size - actual_size - 1, stored as the last byte.
     The total file on the wire is exactly the tier size.
     
     Args:
@@ -253,11 +253,11 @@ def pad_payload(data: bytes) -> Tuple[bytes, int]:
     """
     original_size = len(data)
     tier = select_padding_tier(original_size)
-    pad_len = tier - original_size - 1  # -1 for the pad_len byte
+    pad_len = tier - original_size - PADDING_TRAILER_SIZE
     if pad_len < 0:
         raise ValueError("Padding calculation overflow")
     padding = os.urandom(pad_len)
-    padded = data + padding + bytes([pad_len & 0xFF])
+    padded = data + padding + original_size.to_bytes(PADDING_TRAILER_SIZE, "big")
     return padded, original_size
 
 
@@ -270,9 +270,13 @@ def unpad_payload(padded: bytes) -> bytes:
     Returns:
         Original unpadded data.
     """
-    pad_len = padded[-1]  # last byte encodes padding length
-    # pad_len is the number of padding bytes AFTER the pad_len byte
-    original_size = len(padded) - pad_len - 1
+    if len(padded) < PADDING_TRAILER_SIZE:
+        raise ValueError("Padded payload is too short")
+    original_size = int.from_bytes(padded[-PADDING_TRAILER_SIZE:], "big")
+    if original_size > len(padded) - PADDING_TRAILER_SIZE:
+        raise ValueError(
+            f"Invalid original size {original_size} for padded payload of {len(padded)} bytes"
+        )
     return padded[:original_size]
 
 
