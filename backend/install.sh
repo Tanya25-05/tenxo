@@ -50,6 +50,18 @@ command -v cargo &>/dev/null || {
   exit 1
 }
 
+if ! command -v cryptsetup &>/dev/null || ! command -v mkfs.ext4 &>/dev/null; then
+  if command -v apt-get &>/dev/null; then
+    echo "Installing LUKS workspace dependencies..."
+    sudo apt-get update
+    sudo apt-get install -y cryptsetup e2fsprogs util-linux
+  else
+    echo "ERROR: cryptsetup, mkfs.ext4, mount, umount, and shred are required for LUKS workspaces."
+    echo "Install cryptsetup/e2fsprogs/util-linux with your OS package manager and rerun this installer."
+    exit 1
+  fi
+fi
+
 # ── Clone edge_agent only (sparse checkout) ────────────────────────────────
 BUILD_DIR="/tmp/tenxo-build"
 echo "[1/4] Building edge agent from source..."

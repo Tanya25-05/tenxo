@@ -472,7 +472,8 @@ def cmd_run(
                         result_url = sj.get("result_url") or result_url
                         break
                     elif sj.get("status") == "error":
-                        print(f"Job error: {sj.get('error')}")
+                        err = sj.get("error") or sj.get("message") or json.dumps(sj, sort_keys=True)
+                        print(f"Job error: {err}")
                         sys.exit(1)
             except Exception:
                 pass
