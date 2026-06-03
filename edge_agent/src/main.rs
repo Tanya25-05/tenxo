@@ -41,7 +41,8 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -436,10 +437,41 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value) 
     }
 
     println!("Running job with runtime {:?}", runtime);
-    let output = Command::new("docker")
+
+    let mut child = Command::new("docker")
         .args(&docker_args)
-        .output()
-        .context("failed to execute docker")?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to spawn docker")?;
+
+    // 10-minute timeout — Docker build/pull + execution
+    let max_wait = Duration::from_secs(600);
+    let start = Instant::now();
+
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = child.wait_with_output().unwrap_or_else(|_| {
+                    Output { status, stdout: vec![], stderr: vec![] }
+                });
+                break out;
+            }
+            Ok(None) => {
+                if start.elapsed() > max_wait {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(anyhow!("docker execution timed out after 600s"));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow!("docker process error: {}", e));
+            }
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
