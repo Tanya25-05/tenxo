@@ -103,6 +103,8 @@ struct JobMsg {
     script: Option<String>,
     #[serde(default)]
     image: Option<String>,
+    #[serde(default)]
+    job_type: Option<String>,
 }
 
 #[derive(serde::Serialize, Deserialize, Clone)]
@@ -352,22 +354,24 @@ fn perform_key_exchange(
 // ─── Container Runtime (Docker / Kata) ──────────────────────────────────────
 
 fn docker_has_gpu_support() -> bool {
-    // Check nvidia-smi first (drivers loaded)
-    if Command::new("nvidia-smi").output().is_err() {
-        return false;
-    }
-    // Then check Docker has the nvidia runtime registered
-    Command::new("docker")
-        .args(["info", "--format", "{{.Runtimes}}"])
-        .output()
-        .ok()
-        .and_then(|o| if o.status.success() {
-            let s = String::from_utf8_lossy(&o.stdout);
-            Some(s.contains("nvidia"))
-        } else {
-            Some(false)
-        })
-        .unwrap_or(false)
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if Command::new("nvidia-smi").output().is_err() {
+            return false;
+        }
+        Command::new("docker")
+            .args(["info", "--format", "{{.Runtimes}}"])
+            .output()
+            .ok()
+            .and_then(|o| if o.status.success() {
+                let s = String::from_utf8_lossy(&o.stdout);
+                Some(s.contains("nvidia"))
+            } else {
+                Some(false)
+            })
+            .unwrap_or(false)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -399,13 +403,37 @@ fn detect_nvidia_pci_devices() -> Vec<String> {
     }
 }
 
-fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value) -> Result<()> {
+fn pull_docker_image(image: &str) -> Result<()> {
+    println!("Pulling Docker image: {}", image);
+    let pull_output = Command::new("docker")
+        .args(["pull", image])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("failed to execute docker pull")?;
+
+    if !pull_output.status.success() {
+        let stderr = String::from_utf8_lossy(&pull_output.stderr);
+        return Err(anyhow!("docker pull failed for {}: {}", image, stderr.trim()));
+    }
+
+    println!("Docker image {} pulled successfully", image);
+    Ok(())
+}
+
+fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, job_id: &str) -> Result<()> {
     let (image, cmd) = build_docker_config(job_type, config);
     let runtime = get_container_runtime();
     let timeout_secs = env::var("AGENT_DOCKER_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_DOCKER_TIMEOUT_SECS);
+
+    pull_docker_image(&image)?;
+
+    let output_dir = workspace.join("output");
+    fs::create_dir_all(&output_dir)
+    .context("failed to create output directory")?;
 
     let work_dir = workspace.to_string_lossy().to_string();
     fs::create_dir_all(workspace.join("output"))
@@ -442,8 +470,6 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value) 
     }
 
     docker_args.push("--rm".to_string());
-    docker_args.push("--network".to_string());
-    docker_args.push("none".to_string());
     docker_args.push("--security-opt".to_string());
     docker_args.push("no-new-privileges:true".to_string());
     docker_args.push("--cap-drop".to_string());
@@ -455,19 +481,23 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value) 
     docker_args.push("-w".to_string());
     docker_args.push("/workspace".to_string());
     docker_args.push("-e".to_string());
-    docker_args.push("JOB_ID=tenxo".to_string());
+    docker_args.push(format!("JOB_ID={}", job_id));
     docker_args.push("-e".to_string());
     docker_args.push("PYTHONUNBUFFERED=1".to_string());
+    let memory_limit = env::var("DOCKER_MEMORY").unwrap_or_else(|_| "32g".into());
+    let cpu_limit = env::var("DOCKER_CPUS").unwrap_or_else(|_| "8".into());
     docker_args.push("--memory".to_string());
-    docker_args.push("32g".to_string());
+    docker_args.push(memory_limit);
     docker_args.push("--cpus".to_string());
-    docker_args.push("8".to_string());
+    docker_args.push(cpu_limit);
     docker_args.push(image.clone());
     for c in &cmd {
         docker_args.push(c.clone());
     }
 
-    println!("Running job with runtime {:?}, image {}, timeout {}s", runtime, image, timeout_secs);
+    println!("Running Docker command: docker {}", docker_args.join(" "));
+    println!("Running job with runtime {:?}", runtime);
+
     let mut child = Command::new("docker")
         .args(&docker_args)
         .stdout(Stdio::piped())
@@ -475,10 +505,35 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value) 
         .spawn()
         .context("failed to spawn docker")?;
 
-    let started = std::time::Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
+    // 10-minute timeout — Docker build/pull + execution
+    let max_wait = Duration::from_secs(600);
+    let start = Instant::now();
+
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = match child.wait_with_output() {
+                    Ok(out) => out,
+                    Err(e) => {
+                        eprintln!("warning: failed to read docker output: {}", e);
+                        Output { status, stdout: vec![], stderr: vec![] }
+                    }
+                };
+                break out;
+            }
+            Ok(None) => {
+                if start.elapsed() > max_wait {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(anyhow!("docker execution timed out after 600s"));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow!("docker process error: {}", e));
+            }
         }
         if started.elapsed() > Duration::from_secs(timeout_secs) {
             let _ = child.kill();
@@ -510,12 +565,16 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value) 
     }
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!("Docker stdout:\n{}", stdout);
+        eprintln!("Docker stderr:\n{}", stderr);
         return Err(anyhow!(
-            "docker exited with {:?}. stdout={} stderr={}",
-            output.status.code(),
-            stdout.trim(),
-            stderr.trim()
-        ));
+        "docker exited with code {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        stdout,
+        stderr
+    ));
     }
 
     Ok(())
@@ -532,11 +591,12 @@ fn build_docker_config(job_type: &str, config: &serde_json::Value) -> (String, V
                 .get("image")
                 .and_then(|v| v.as_str())
                 .unwrap_or("pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime");
-            let cmd = format!(
-                "bash -c 'if [ -f requirements.txt ]; then echo \"Skipping requirements.txt install because job network is disabled; bake dependencies into the image\"; fi; python {}'",
-                script
-            );
-            (image.into(), vec!["bash".into(), "-c".into(), cmd])
+                let cmd = format!(
+            "ls -la /workspace && if [ -f requirements.txt ]; then pip install -r requirements.txt -q; fi; python {}",
+            script
+        );
+
+        (image.into(), vec!["bash".into(), "-c".into(), cmd])
         }
         "blender" => {
             let blend = config
@@ -544,7 +604,7 @@ fn build_docker_config(job_type: &str, config: &serde_json::Value) -> (String, V
                 .and_then(|v| v.as_str())
                 .unwrap_or("scene.blend");
             let cmd = format!(
-                "bash -c 'apt-get update -qq && apt-get install -y -qq blender && blender -b {} -o /workspace/output/frame_#### -s 1 -e 1 -a'",
+                "bash -c 'apt-get update -qq && apt-get install -y -qq blender && blender -b {} -o /output/frame_#### -s 1 -e 1 -a'",
                 blend
             );
             ("nvidia/cuda:12.2.0-runtime-ubuntu22.04".into(), vec!["bash".into(), "-c".into(), cmd])
@@ -835,10 +895,21 @@ fn handle_job(
         .context("failed to open ZIP archive")?;
     archive.extract(&workspace)
         .context("failed to extract ZIP archive")?;
+    println!("Workspace contents:");
+
+    for entry in walkdir::WalkDir::new(&workspace) {
+        match entry {
+            Ok(e) => println!("  {}", e.path().display()),
+            Err(err) => eprintln!("walkdir error: {}", err),
+        }
+    }
     println!("Extracted workspace to LUKS-protected {:?}", workspace);
+    println!("Job script requested: {:?}", job.script);
+    println!("Job image requested: {:?}", job.image);
+    println!("Job type: {:?}", job.job_type);
 
     // ── Step 4: Execute inside Docker/Kata ────────────────────────────
-    let job_type = "python";
+    let job_type = job.job_type.as_deref().unwrap_or("python");
     let mut config = serde_json::json!({});
     if let Some(script) = &job.script {
         config["script"] = serde_json::Value::String(script.clone());
@@ -847,7 +918,18 @@ fn handle_job(
         config["image"] = serde_json::Value::String(image.clone());
     }
 
-    run_docker_job(&workspace, job_type, &config)
+    // - validating script exists before docker start
+    let script_name = job.script.as_deref().unwrap_or("main.py");
+    let script_path = workspace.join(script_name);
+
+    if !script_path.exists() {
+        return Err(anyhow!(
+            "script file not found after extraction: {}",
+            script_path.display()
+        ));
+    }
+
+    run_docker_job(&workspace, job_type, &config, job_id)
         .context("Docker execution failed")?;
     println!("Job execution complete");
 

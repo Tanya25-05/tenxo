@@ -75,6 +75,12 @@ def main():
         default=None,
         help="Docker image to use (default: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime)",
     )
+    run_p.add_argument(
+        "--job-type",
+        default=None,
+        choices=["python", "cuda", "blender", "custom"],
+        help="Job runtime type (default: auto-detected from --script extension)",
+    )
 
     args = parser.parse_args()
 
@@ -85,7 +91,7 @@ def main():
     elif args.command == "list":
         cmd_list(args.api_url, args.api_key)
     elif args.command == "run":
-        cmd_run(args.path, args.api_url, args.api_key, args.timeout, args.gpu_model, args.node_id, args.presign_ttl, script=args.script, image=args.image)
+        cmd_run(args.path, args.api_url, args.api_key, args.timeout, args.gpu_model, args.node_id, args.presign_ttl, script=args.script, image=args.image, job_type=args.job_type)
     else:
         parser.print_help()
         sys.exit(1)

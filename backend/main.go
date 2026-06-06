@@ -64,6 +64,7 @@ type JobRequest struct {
 	GPUModel                string `json:"gpu_model"`
 	Script                  string `json:"script"`
 	Image                   string `json:"image"`
+	JobType                 string `json:"job_type,omitempty"`
 	NodeID                  string `json:"node_id"`
 	WorkspaceID             string `json:"workspace_id,omitempty"`
 	EncryptedWorkspaceKeyB64 string `json:"encrypted_workspace_key_b64,omitempty"`
@@ -705,6 +706,16 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.Image != "" {
 		msg["image"] = payload.Image
+	}
+	if payload.JobType != "" {
+		msg["job_type"] = payload.JobType
+	}
+	if payload.JobType == "" && payload.Script != "" {
+		if strings.HasSuffix(payload.Script, ".py") || payload.Script == "main.py" {
+			msg["job_type"] = "python"
+		} else if strings.HasSuffix(payload.Script, ".cu") {
+			msg["job_type"] = "cuda"
+		}
 	}
 	if payload.EncKeyB64 != "" {
 		msg["enc_key_b64"] = payload.EncKeyB64

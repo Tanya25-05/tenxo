@@ -352,6 +352,7 @@ def cmd_run(
     presign_ttl: int | None = None,
     script: str = "main.py",
     image: str | None = None,
+    job_type: str | None = None,
 ):
     cfg = _config()
     api_url = api_url or cfg.get("api_url")
@@ -451,6 +452,14 @@ def cmd_run(
         }
         if image is not None:
             job_post["image"] = image
+        if job_type is not None:
+            job_post["job_type"] = job_type
+        elif script.endswith(".cu"):
+            job_post["job_type"] = "cuda"
+        elif script.endswith(".py"):
+            job_post["job_type"] = "python"
+        elif script.endswith(".blend"):
+            job_post["job_type"] = "blender"
         print("Submitting job (zero-knowledge — AES key never sent)...")
         resp = requests.post(
             f"{api_url.rstrip('/')}/jobs",
