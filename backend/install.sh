@@ -100,8 +100,12 @@ OWNER=$OWNER
 
 # Optional: custom node ID (defaults to hostname)
 # NODE_ID=
+
+# Docker-visible job workspace root. Do not use /tmp with PrivateTmp=true.
+TENXO_WORK_DIR=/var/lib/tenxo/workspaces
 ENVEOF
 echo "       Created $CONFIG_DIR/agent.env"
+sudo mkdir -p /var/lib/tenxo/workspaces
 
 # ── Install systemd service ────────────────────────────────────────────────
 echo "[4/4] Installing systemd service..."
@@ -122,9 +126,11 @@ LimitNOFILE=65536
 
 # Security hardening
 NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
+
+# The agent creates per-job LUKS mounts and then asks the Docker daemon to bind
+# mount those paths. Do not enable systemd filesystem/mount namespace isolation
+# here, or Docker will see the empty pre-mount directory instead of the mounted
+# workspace.
 
 [Install]
 WantedBy=multi-user.target

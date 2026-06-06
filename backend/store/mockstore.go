@@ -203,6 +203,7 @@ func (m *MockStore) ListJobsByOwner(ctx context.Context, owner string, limit int
 			UploadURL:       fields["upload_url"],
 			ResultUploadURL: fields["result_upload_url"],
 			ResultURL:       fields["result_url"],
+			ReceiptURL:      fields["receipt_url"],
 			GPUModel:        fields["gpu_model"],
 			CreatedAt:       now,
 			UpdatedAt:       now,
@@ -395,9 +396,9 @@ type mockWorkspace struct {
 }
 
 var (
-	wsMu        sync.Mutex
-	workspaces  = make(map[string]*mockWorkspace)
-	wsSeq       int
+	wsMu       sync.Mutex
+	workspaces = make(map[string]*mockWorkspace)
+	wsSeq      int
 )
 
 func (m *MockStore) WorkspaceSet(ctx context.Context, workspaceID string, fields map[string]string) error {
@@ -408,10 +409,18 @@ func (m *MockStore) WorkspaceSet(ctx context.Context, workspaceID string, fields
 		w = &mockWorkspace{WorkspaceID: workspaceID, CreatedAt: time.Now()}
 		workspaces[workspaceID] = w
 	}
-	if v, ok := fields["owner"]; ok { w.Owner = v }
-	if v, ok := fields["upload_url"]; ok { w.UploadURL = v }
-	if v, ok := fields["enc_key_b64"]; ok { w.EncKeyB64 = v }
-	if v, ok := fields["overlay_url"]; ok { w.OverlayURL = v }
+	if v, ok := fields["owner"]; ok {
+		w.Owner = v
+	}
+	if v, ok := fields["upload_url"]; ok {
+		w.UploadURL = v
+	}
+	if v, ok := fields["enc_key_b64"]; ok {
+		w.EncKeyB64 = v
+	}
+	if v, ok := fields["overlay_url"]; ok {
+		w.OverlayURL = v
+	}
 	w.UpdatedAt = time.Now()
 	return nil
 }
@@ -434,7 +443,9 @@ func (m *MockStore) WorkspaceGet(ctx context.Context, workspaceID string) (map[s
 func (m *MockStore) ListWorkspacesByOwner(ctx context.Context, owner string, limit int) ([]WorkspaceInfo, error) {
 	wsMu.Lock()
 	defer wsMu.Unlock()
-	if limit <= 0 || limit > 100 { limit = 50 }
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
 	var result []WorkspaceInfo
 	for _, w := range workspaces {
 		if w.Owner == owner {

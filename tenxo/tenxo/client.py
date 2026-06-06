@@ -423,6 +423,7 @@ def cmd_run(
             upload_url = pres["upload_url"]
             download_url = pres.get("download_url", upload_url)
             result_url = pres.get("result_url")
+            receipt_url = pres.get("receipt_url")
             job_id = pres.get("job_id")
         except Exception as e:
             print(f"Failed to get presigned URLs: {e}")
@@ -484,6 +485,7 @@ def cmd_run(
                     sj = r.json()
                     if sj.get("status") == "done":
                         result_url = sj.get("result_url") or result_url
+                        receipt_url = sj.get("receipt_url") or receipt_url
                         break
                     elif sj.get("status") == "error":
                         err = sj.get("error") or sj.get("message") or json.dumps(sj, sort_keys=True)
@@ -497,10 +499,12 @@ def cmd_run(
                 sys.exit(1)
 
         # ── Step 9: Download and verify integrity receipt ──────────────
-        receipt_url = result_url + ".receipt"
         try:
-            rr = requests.get(receipt_url, timeout=30)
-            if rr.status_code == 200:
+            rr = requests.get(receipt_url, headers=headers, timeout=30) if receipt_url else None
+            if rr is None:
+                print("Integrity receipt not yet available")
+                receipt = None
+            elif rr.status_code == 200:
                 receipt_enc = rr.content
                 receipt_plain = decrypt_payload(receipt_enc, final_key)
                 receipt = json.loads(receipt_plain)
@@ -515,7 +519,7 @@ def cmd_run(
 
         # ── Step 10: Download and decrypt result ───────────────────────
         print(f"Downloading result from {result_url}")
-        r = requests.get(result_url, timeout=60)
+        r = requests.get(result_url, headers=headers, timeout=60)
         r.raise_for_status()
 
         enc = r.content

@@ -95,6 +95,10 @@ struct JobMsg {
     encrypted_job_link: String,
     result_upload_url: String,
     #[serde(default)]
+    result_url: Option<String>,
+    #[serde(default)]
+    receipt_upload_url: Option<String>,
+    #[serde(default)]
     enc_key_b64: Option<String>,
     #[serde(default)]
     salt_b64: Option<String>,
@@ -557,9 +561,10 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, 
         }
         RuntimeKind::Docker => {
             if docker_has_gpu_support() {
+                docker_args.push("--runtime=nvidia".to_string());
                 docker_args.push("--gpus".to_string());
                 docker_args.push("all".to_string());
-                println!("Docker: GPU passthrough enabled via --gpus all");
+                println!("Docker: GPU passthrough enabled via --runtime=nvidia --gpus all");
             } else {
                 println!("Docker: nvidia-container-toolkit not detected — running without GPU");
             }
@@ -579,6 +584,14 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, 
     docker_args.push(format!("JOB_ID={}", job_id));
     docker_args.push("-e".to_string());
     docker_args.push("PYTHONUNBUFFERED=1".to_string());
+    docker_args.push("-e".to_string());
+    docker_args.push("PIP_ROOT_USER_ACTION=ignore".to_string());
+    if runtime == RuntimeKind::Docker && docker_has_gpu_support() {
+        docker_args.push("-e".to_string());
+        docker_args.push("NVIDIA_VISIBLE_DEVICES=all".to_string());
+        docker_args.push("-e".to_string());
+        docker_args.push("NVIDIA_DRIVER_CAPABILITIES=compute,utility".to_string());
+    }
     let memory_limit = env::var("DOCKER_MEMORY").unwrap_or_else(|_| "32g".into());
     let cpu_limit = env::var("DOCKER_CPUS").unwrap_or_else(|_| "8".into());
     docker_args.push("--memory".to_string());
@@ -796,6 +809,25 @@ fn luks_preflight() -> Result<()> {
     Ok(())
 }
 
+fn create_job_tempdir() -> Result<tempfile::TempDir> {
+    let base_dir = env::var("TENXO_WORK_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/lib/tenxo/workspaces"));
+
+    match fs::create_dir_all(&base_dir) {
+        Ok(()) => tempfile::tempdir_in(&base_dir)
+            .with_context(|| format!("failed to create temp workspace under {}", base_dir.display())),
+        Err(err) => {
+            eprintln!(
+                "Warning: could not create {}; falling back to system temp dir: {}",
+                base_dir.display(),
+                err
+            );
+            tempdir().context("failed to create temp workspace")
+        }
+    }
+}
+
 fn setup_luks_container(container_path: &std::path::Path, passphrase: &str, mount_point: &std::path::Path, job_id: &str) -> Result<String> {
     let container_str = container_path.to_string_lossy();
     let mapper_name = format!(
@@ -940,7 +972,7 @@ fn handle_job(
     let input_hash = hash_sha256(&plain);
 
     // ── Step 3: LUKS2 container for at-rest protection ────────────────
-    let td = tempdir().context("failed to create temp workspace")?;
+    let td = create_job_tempdir()?;
     let container_path = td.path().join("workspace.luks");
     let mount_point = td.path().join("mnt");
 
@@ -1069,8 +1101,10 @@ fn handle_job(
     println!("Encrypted result uploaded to {}", job.result_upload_url);
     println!("Integrity receipt: input_sha256={} output_sha256={}", input_hash, output_hash);
 
-    // Append receipt URL to the result upload URL
-    let receipt_url = format!("{}.receipt", job.result_upload_url);
+    let receipt_url = job
+        .receipt_upload_url
+        .clone()
+        .unwrap_or_else(|| format!("{}.receipt", job.result_upload_url));
     let res_receipt = client
         .put(&receipt_url)
         .body(encrypted_receipt)
@@ -1080,7 +1114,7 @@ fn handle_job(
         eprintln!("Warning: receipt upload failed: {}", res_receipt.status());
     }
 
-    Ok(job.result_upload_url.clone())
+    Ok(job.result_url.clone().unwrap_or_else(|| job.result_upload_url.clone()))
 }
 
 // ─── Networking ────────────────────────────────────────────────────────────
