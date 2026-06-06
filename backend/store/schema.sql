@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     upload_url TEXT NOT NULL DEFAULT '',
     result_upload_url TEXT NOT NULL DEFAULT '',
     result_url TEXT NOT NULL DEFAULT '',
+    receipt_upload_url TEXT NOT NULL DEFAULT '',
+    receipt_url TEXT NOT NULL DEFAULT '',
+    storage_token TEXT NOT NULL DEFAULT '',
     enc_key_b64 TEXT NOT NULL DEFAULT '',
     salt_b64 TEXT NOT NULL DEFAULT '',
     upload_path TEXT NOT NULL DEFAULT '',
@@ -28,6 +31,9 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS gpu_model TEXT NOT NULL DEFAULT '';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS gpu_vram_mb INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS receipt_upload_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS receipt_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS storage_token TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_jobs_owner_updated_at ON jobs(owner, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_status_updated_at ON jobs(status, updated_at DESC);
 

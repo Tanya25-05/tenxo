@@ -172,20 +172,24 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 	// Since our schema has fixed columns, we map known fields.
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO jobs (job_id, owner, status, upload_url, result_upload_url, result_url,
+		                   receipt_upload_url, receipt_url, storage_token,
 		                   enc_key_b64, salt_b64, upload_path, result_path, gpu_model, gpu_vram_mb, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
 		 ON CONFLICT (job_id) DO UPDATE SET
 		   owner=COALESCE(NULLIF($2,''), jobs.owner),
 		   status=COALESCE(NULLIF($3,''), jobs.status),
 		   upload_url=COALESCE(NULLIF($4,''), jobs.upload_url),
 		   result_upload_url=COALESCE(NULLIF($5,''), jobs.result_upload_url),
 		   result_url=COALESCE(NULLIF($6,''), jobs.result_url),
-		   enc_key_b64=COALESCE(NULLIF($7,''), jobs.enc_key_b64),
-		   salt_b64=COALESCE(NULLIF($8,''), jobs.salt_b64),
-		   upload_path=COALESCE(NULLIF($9,''), jobs.upload_path),
-		   result_path=COALESCE(NULLIF($10,''), jobs.result_path),
-		   gpu_model=COALESCE(NULLIF($11,''), jobs.gpu_model),
-		   gpu_vram_mb=CASE WHEN $12=0 THEN jobs.gpu_vram_mb ELSE $12 END,
+		   receipt_upload_url=COALESCE(NULLIF($7,''), jobs.receipt_upload_url),
+		   receipt_url=COALESCE(NULLIF($8,''), jobs.receipt_url),
+		   storage_token=COALESCE(NULLIF($9,''), jobs.storage_token),
+		   enc_key_b64=COALESCE(NULLIF($10,''), jobs.enc_key_b64),
+		   salt_b64=COALESCE(NULLIF($11,''), jobs.salt_b64),
+		   upload_path=COALESCE(NULLIF($12,''), jobs.upload_path),
+		   result_path=COALESCE(NULLIF($13,''), jobs.result_path),
+		   gpu_model=COALESCE(NULLIF($14,''), jobs.gpu_model),
+		   gpu_vram_mb=CASE WHEN $15=0 THEN jobs.gpu_vram_mb ELSE $15 END,
 		   updated_at=NOW()`,
 		jobID,
 		fields["owner"],
@@ -193,6 +197,9 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 		fields["upload_url"],
 		fields["result_upload_url"],
 		fields["result_url"],
+		fields["receipt_upload_url"],
+		fields["receipt_url"],
+		fields["storage_token"],
 		fields["enc_key_b64"],
 		fields["salt_b64"],
 		fields["upload_path"],
@@ -208,7 +215,9 @@ func (s *PGStore) JobGet(ctx context.Context, jobID, field string) (string, erro
 	allowed := map[string]bool{
 		"owner": true, "status": true, "upload_url": true,
 		"result_upload_url": true, "result_url": true,
-		"enc_key_b64": true, "salt_b64": true,
+		"receipt_upload_url": true, "receipt_url": true,
+		"storage_token": true,
+		"enc_key_b64":   true, "salt_b64": true,
 		"upload_path": true, "result_path": true,
 		"gpu_model": true, "gpu_vram_mb": true,
 	}
@@ -229,7 +238,7 @@ func (s *PGStore) ListJobsByOwner(ctx context.Context, owner string, limit int) 
 		limit = 50
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT job_id, owner, status, upload_url, result_upload_url, result_url,
+		`SELECT job_id, owner, status, upload_url, result_upload_url, result_url, receipt_url,
 		        gpu_model, gpu_vram_mb, created_at, updated_at
 		 FROM jobs
 		 WHERE owner=$1
@@ -245,7 +254,7 @@ func (s *PGStore) ListJobsByOwner(ctx context.Context, owner string, limit int) 
 	for rows.Next() {
 		var j JobInfo
 		if err := rows.Scan(&j.JobID, &j.Owner, &j.Status, &j.UploadURL, &j.ResultUploadURL,
-			&j.ResultURL, &j.GPUModel, &j.GPUVRAMMB, &j.CreatedAt, &j.UpdatedAt); err != nil {
+			&j.ResultURL, &j.ReceiptURL, &j.GPUModel, &j.GPUVRAMMB, &j.CreatedAt, &j.UpdatedAt); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, j)
@@ -255,26 +264,32 @@ func (s *PGStore) ListJobsByOwner(ctx context.Context, owner string, limit int) 
 
 func (s *PGStore) JobGetAll(ctx context.Context, jobID string) (map[string]string, error) {
 	var owner, status, uploadURL, resultUploadURL, resultURL string
+	var receiptUploadURL, receiptURL, storageToken string
 	var encKeyB64, saltB64, uploadPath, resultPath string
 	err := s.pool.QueryRow(ctx,
 		`SELECT owner, status, upload_url, result_upload_url, result_url,
+		        receipt_upload_url, receipt_url, storage_token,
 		        enc_key_b64, salt_b64, upload_path, result_path
 		 FROM jobs WHERE job_id=$1`,
 		jobID).Scan(&owner, &status, &uploadURL, &resultUploadURL, &resultURL,
+		&receiptUploadURL, &receiptURL, &storageToken,
 		&encKeyB64, &saltB64, &uploadPath, &resultPath)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]string{
-		"owner":             owner,
-		"status":            status,
-		"upload_url":        uploadURL,
-		"result_upload_url": resultUploadURL,
-		"result_url":        resultURL,
-		"enc_key_b64":       encKeyB64,
-		"salt_b64":          saltB64,
-		"upload_path":       uploadPath,
-		"result_path":       resultPath,
+		"owner":              owner,
+		"status":             status,
+		"upload_url":         uploadURL,
+		"result_upload_url":  resultUploadURL,
+		"result_url":         resultURL,
+		"receipt_upload_url": receiptUploadURL,
+		"receipt_url":        receiptURL,
+		"storage_token":      storageToken,
+		"enc_key_b64":        encKeyB64,
+		"salt_b64":           saltB64,
+		"upload_path":        uploadPath,
+		"result_path":        resultPath,
 	}, nil
 }
 

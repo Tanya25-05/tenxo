@@ -23,6 +23,7 @@ type JobInfo struct {
 	UploadURL       string    `json:"upload_url,omitempty"`
 	ResultUploadURL string    `json:"result_upload_url,omitempty"`
 	ResultURL       string    `json:"result_url,omitempty"`
+	ReceiptURL      string    `json:"receipt_url,omitempty"`
 	GPUModel        string    `json:"gpu_model,omitempty"`
 	GPUVRAMMB       int       `json:"gpu_vram_mb,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`

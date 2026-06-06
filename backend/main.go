@@ -96,12 +96,14 @@ type PresignRequest struct {
 }
 
 type PresignResponse struct {
-	UploadURL       string `json:"upload_url"`
-	DownloadURL     string `json:"download_url"`
-	ResultUploadURL string `json:"result_upload_url"`
-	ResultURL       string `json:"result_url"`
-	JobID           string `json:"job_id"`
-	EncKeyB64       string `json:"enc_key_b64"`
+	UploadURL        string `json:"upload_url"`
+	DownloadURL      string `json:"download_url"`
+	ResultUploadURL  string `json:"result_upload_url"`
+	ResultURL        string `json:"result_url"`
+	ReceiptUploadURL string `json:"receipt_upload_url"`
+	ReceiptURL       string `json:"receipt_url"`
+	JobID            string `json:"job_id"`
+	EncKeyB64        string `json:"enc_key_b64"`
 }
 
 func main() {
@@ -176,6 +178,7 @@ func main() {
 	http.HandleFunc("/jobs/", cors(srv.authMiddleware(srv.handleJobStatus)))
 	http.HandleFunc("/storage/upload/", cors(srv.handleStorageUpload))
 	http.HandleFunc("/storage/result-upload/", cors(srv.handleStorageResultUpload))
+	http.HandleFunc("/storage/receipt-upload/", cors(srv.handleStorageReceiptUpload))
 	http.HandleFunc("/storage/result/", cors(srv.authMiddleware(srv.handleStorageGet)))
 	http.HandleFunc("/storage/receipt/", cors(srv.authMiddleware(srv.handleStorageReceipt)))
 	http.HandleFunc("/ws", cors(srv.handleWS))
@@ -559,15 +562,16 @@ func newStorageToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(tokenBytes), nil
 }
 
-func (s *Server) getUploadURLs(ctx context.Context, jobID string, ttl time.Duration) (uploadURL, resultUploadURL, resultURL, downloadURL, storageToken string, err error) {
+func (s *Server) getUploadURLs(ctx context.Context, jobID string, ttl time.Duration) (uploadURL, resultUploadURL, resultURL, downloadURL, receiptUploadURL, receiptURL, storageToken string, err error) {
 	client, bucket, err := s.r2Client(ctx)
 	public := getEnv("PUBLIC_API_URL", "http://localhost:8080")
 	if err != nil {
-		return "", "", "", "", "", err
+		return "", "", "", "", "", "", "", err
 	}
 	if client != nil {
 		uploadKey := fmt.Sprintf("jobs/%s.enc", jobID)
 		resultKey := fmt.Sprintf("results/%s.enc", jobID)
+		receiptKey := fmt.Sprintf("receipts/%s.enc", jobID)
 		var presigner *s3.PresignClient
 		if ttl > 0 {
 			presigner = s3.NewPresignClient(client, s3.WithPresignExpires(ttl))
@@ -577,33 +581,43 @@ func (s *Server) getUploadURLs(ctx context.Context, jobID string, ttl time.Durat
 
 		putReq, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: &bucket, Key: &uploadKey})
 		if err != nil {
-			return "", "", "", "", "", err
+			return "", "", "", "", "", "", "", err
 		}
 		resultPutReq, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: &bucket, Key: &resultKey})
 		if err != nil {
-			return "", "", "", "", "", err
+			return "", "", "", "", "", "", "", err
+		}
+		receiptPutReq, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: &bucket, Key: &receiptKey})
+		if err != nil {
+			return "", "", "", "", "", "", "", err
 		}
 		getReq, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &resultKey})
 		if err != nil {
-			return "", "", "", "", "", err
+			return "", "", "", "", "", "", "", err
+		}
+		receiptGetReq, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &receiptKey})
+		if err != nil {
+			return "", "", "", "", "", "", "", err
 		}
 		// Presigned GET URL for the job payload — agent needs this to download
 		downloadGetReq, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &uploadKey})
 		if err != nil {
-			return "", "", "", "", "", err
+			return "", "", "", "", "", "", "", err
 		}
-		return putReq.URL, resultPutReq.URL, getReq.URL, downloadGetReq.URL, "", nil
+		return putReq.URL, resultPutReq.URL, getReq.URL, downloadGetReq.URL, receiptPutReq.URL, receiptGetReq.URL, "", nil
 	}
 
 	storageToken, err = newStorageToken()
 	if err != nil {
-		return "", "", "", "", "", err
+		return "", "", "", "", "", "", "", err
 	}
 	uploadURL = fmt.Sprintf("%s/storage/upload/%s?token=%s", public, jobID, storageToken)
 	downloadURL = uploadURL
 	resultUploadURL = fmt.Sprintf("%s/storage/result-upload/%s?token=%s", public, jobID, storageToken)
 	resultURL = fmt.Sprintf("%s/storage/result/%s", public, jobID)
-	return uploadURL, resultUploadURL, resultURL, downloadURL, storageToken, nil
+	receiptUploadURL = fmt.Sprintf("%s/storage/receipt-upload/%s?token=%s", public, jobID, storageToken)
+	receiptURL = fmt.Sprintf("%s/storage/receipt/%s", public, jobID)
+	return uploadURL, resultUploadURL, resultURL, downloadURL, receiptUploadURL, receiptURL, storageToken, nil
 }
 
 // parseAndValidateToken parses a JWT token string and returns the parsed token after validation
@@ -705,6 +719,9 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch result_upload_url (set by presign or from env default)
 	resultUploadURL, _ := s.st.JobGet(ctx, jobID, "result_upload_url")
+	resultURL, _ := s.st.JobGet(ctx, jobID, "result_url")
+	receiptUploadURL, _ := s.st.JobGet(ctx, jobID, "receipt_upload_url")
+	receiptURL, _ := s.st.JobGet(ctx, jobID, "receipt_url")
 	if resultUploadURL == "" {
 		// If no presign was done, build a default result upload URL
 		public := getEnv("PUBLIC_API_URL", "http://localhost:8080")
@@ -714,9 +731,15 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resultUploadURL = fmt.Sprintf("%s/storage/result-upload/%s?token=%s", public, jobID, storageToken)
+		resultURL = fmt.Sprintf("%s/storage/result/%s", public, jobID)
+		receiptUploadURL = fmt.Sprintf("%s/storage/receipt-upload/%s?token=%s", public, jobID, storageToken)
+		receiptURL = fmt.Sprintf("%s/storage/receipt/%s", public, jobID)
 		_ = s.st.JobSet(ctx, jobID, map[string]string{
-			"result_upload_url": resultUploadURL,
-			"storage_token":     storageToken,
+			"result_upload_url":  resultUploadURL,
+			"result_url":         resultURL,
+			"receipt_upload_url": receiptUploadURL,
+			"receipt_url":        receiptURL,
+			"storage_token":      storageToken,
 		})
 	}
 
@@ -731,6 +754,9 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		"job_id":             jobID,
 		"encrypted_job_link": agentJobLink,
 		"result_upload_url":  resultUploadURL,
+		"result_url":         resultURL,
+		"receipt_upload_url": receiptUploadURL,
+		"receipt_url":        receiptURL,
 		"owner":              userID,
 	}
 	if payload.Script != "" {
@@ -1100,30 +1126,34 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 	ttl := time.Duration(req.TTLSeconds) * time.Second
 
 	ctx := context.Background()
-	uploadURL, resultUploadURL, resultURL, downloadURL, storageToken, err := s.getUploadURLs(ctx, jobID, ttl)
+	uploadURL, resultUploadURL, resultURL, downloadURL, receiptUploadURL, receiptURL, storageToken, err := s.getUploadURLs(ctx, jobID, ttl)
 	if err != nil {
 		http.Error(w, "failed to create presigned URLs: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	_ = s.st.JobSet(ctx, jobID, map[string]string{
-		"owner":             userID,
-		"status":            "created",
-		"upload_url":        uploadURL,
-		"download_url":      downloadURL,
-		"result_upload_url": resultUploadURL,
-		"result_url":        resultURL,
-		"enc_key_b64":       keyB64,
-		"storage_token":     storageToken,
+		"owner":              userID,
+		"status":             "created",
+		"upload_url":         uploadURL,
+		"download_url":       downloadURL,
+		"result_upload_url":  resultUploadURL,
+		"result_url":         resultURL,
+		"receipt_upload_url": receiptUploadURL,
+		"receipt_url":        receiptURL,
+		"enc_key_b64":        keyB64,
+		"storage_token":      storageToken,
 	})
 
 	resp := PresignResponse{
-		UploadURL:       uploadURL,
-		DownloadURL:     downloadURL,
-		ResultUploadURL: resultUploadURL,
-		ResultURL:       resultURL,
-		JobID:           jobID,
-		EncKeyB64:       keyB64,
+		UploadURL:        uploadURL,
+		DownloadURL:      downloadURL,
+		ResultUploadURL:  resultUploadURL,
+		ResultURL:        resultURL,
+		ReceiptUploadURL: receiptUploadURL,
+		ReceiptURL:       receiptURL,
+		JobID:            jobID,
+		EncKeyB64:        keyB64,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -1252,6 +1282,48 @@ func (s *Server) handleStorageResultUpload(w http.ResponseWriter, r *http.Reques
 	}
 
 	_ = s.st.JobSet(ctx, jobID, map[string]string{"status": "result_uploaded", "result_path": filePath})
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleStorageReceiptUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rawID := strings.TrimPrefix(r.URL.Path, "/storage/receipt-upload/")
+	jobID := sanitizeJobID(rawID)
+	if jobID == "" {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	if !s.authorizeStorageAccess(ctx, r, jobID) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	uploadsDir := getEnv("UPLOADS_DIR", "uploads")
+	_ = os.MkdirAll(uploadsDir, 0o755)
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<20) // 16 MB max receipt upload
+	filePath, err := safeStoragePath(uploadsDir, jobID+".receipt.enc")
+	if err != nil {
+		http.Error(w, "invalid storage path", http.StatusBadRequest)
+		return
+	}
+	f, err := os.Create(filePath)
+	if err != nil {
+		http.Error(w, "failed to create file", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	_, err = io.Copy(f, r.Body)
+	if err != nil {
+		http.Error(w, "failed to write file", http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
