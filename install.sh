@@ -100,8 +100,12 @@ OWNER=$OWNER
 
 # Optional: custom node ID (defaults to hostname)
 # NODE_ID=
+
+# Docker-visible job workspace root. Do not use /tmp with PrivateTmp=true.
+TENXO_WORK_DIR=/var/lib/tenxo/workspaces
 ENVEOF
 echo "       Created $CONFIG_DIR/agent.env"
+sudo mkdir -p /var/lib/tenxo/workspaces
 
 # ── Install systemd service ────────────────────────────────────────────────
 echo "[4/4] Installing systemd service..."
@@ -125,6 +129,7 @@ NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
+ReadWritePaths=/var/lib/tenxo
 
 [Install]
 WantedBy=multi-user.target
