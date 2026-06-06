@@ -126,10 +126,11 @@ LimitNOFILE=65536
 
 # Security hardening
 NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/var/lib/tenxo
+
+# The agent creates per-job LUKS mounts and then asks the Docker daemon to bind
+# mount those paths. Do not enable systemd filesystem/mount namespace isolation
+# here, or Docker will see the empty pre-mount directory instead of the mounted
+# workspace.
 
 [Install]
 WantedBy=multi-user.target
