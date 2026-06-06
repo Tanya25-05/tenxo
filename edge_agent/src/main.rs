@@ -41,8 +41,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::Instant;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -421,6 +420,108 @@ fn pull_docker_image(image: &str) -> Result<()> {
     Ok(())
 }
 
+fn create_docker_volume(name: &str) -> Result<()> {
+    Command::new("docker")
+        .args(["volume", "create", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .context(format!("failed to create Docker volume {name}"))?;
+    Ok(())
+}
+
+fn remove_docker_volume(name: &str) -> Result<()> {
+    Command::new("docker")
+        .args(["volume", "rm", "-f", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok();
+    Ok(())
+}
+
+/// Copy a directory into a Docker volume by piping a tar stream.
+/// The agent reads from `src` and streams into a helper container
+/// that extracts into the volume.  Never bind-mounts from paths
+/// the Docker daemon may not see (e.g. LUKS mounts, container-local tmpfs).
+fn tar_into_volume(src: &Path, volume: &str) -> Result<()> {
+    let mut helper = Command::new("docker")
+        .args([
+            "run", "--rm", "-i",
+            "-v", &format!("{}:/data", volume),
+            "alpine:latest",
+            "tar", "-C", "/data", "-xzf", "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to spawn tar-into-volume helper")?;
+
+    let mut tar = Command::new("tar")
+        .args(["-C", &src.to_string_lossy(), "-czf", "-", "."])
+        .stdout(helper.stdin.take().unwrap())
+        .spawn()
+        .context("failed to tar workspace")?;
+
+    let status = helper.wait().context("tar-into-volume helper failed")?;
+    let _ = tar.wait();
+
+    if !status.success() {
+        return Err(anyhow!("failed to copy workspace into Docker volume {volume}"));
+    }
+    Ok(())
+}
+
+/// Extract files from a Docker volume path into a local directory via tar pipe.
+/// If the subdirectory does not exist inside the volume this is a no-op.
+fn extract_from_volume(volume: &str, volume_subdir: &str, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+
+    let check = Command::new("docker")
+        .args([
+            "run", "--rm",
+            "-v", &format!("{}:/data:ro", volume),
+            "alpine:latest",
+            "test", "-d", &format!("/data/{}", volume_subdir),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap_or_default();
+
+    if !check.success() {
+        println!("No output directory found in Docker volume {volume} — skipping extract");
+        return Ok(());
+    }
+
+    let mut helper = Command::new("docker")
+        .args([
+            "run", "--rm",
+            "-v", &format!("{}:/data:ro", volume),
+            "alpine:latest",
+            "tar", "-C", &format!("/data/{}", volume_subdir), "-czf", "-", ".",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to spawn volume-extract helper")?;
+
+    let mut extract = Command::new("tar")
+        .args(["-C", &dst.to_string_lossy(), "-xzf", "-"])
+        .stdin(helper.stdout.take().unwrap())
+        .spawn()
+        .context("failed to spawn tar extract")?;
+
+    let status = helper.wait().context("volume-extract helper failed")?;
+    let _ = extract.wait();
+
+    if !status.success() {
+        return Err(anyhow!("failed to extract output from Docker volume {volume}"));
+    }
+    Ok(())
+}
+
 fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, job_id: &str) -> Result<()> {
     let (image, cmd) = build_docker_config(job_type, config);
     let runtime = get_container_runtime();
@@ -431,22 +532,18 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, 
 
     pull_docker_image(&image)?;
 
-    let output_dir = workspace.join("output");
-    fs::create_dir_all(&output_dir)
-    .context("failed to create output directory")?;
+    // ── Docker volumes (avoid bind-mount from LUKS path) ─────────────
+    let volume = format!("tenxo-ws-{}", job_id);
+    create_docker_volume(&volume)?;
 
-    let work_dir = workspace.to_string_lossy().to_string();
-    fs::create_dir_all(workspace.join("output"))
-        .context("failed to create workspace output directory")?;
-    let mount_ro = format!("{}:/workspace:ro", work_dir);
-    let mount_out = format!("{}:/workspace/output", work_dir);
+    // Copy workspace into volume via tar pipe (LUKS path → agent → Docker)
+    tar_into_volume(workspace, &volume)?;
 
     let mut docker_args: Vec<String> = vec!["run".to_string()];
 
     match runtime {
         RuntimeKind::Kata => {
             docker_args.push("--runtime=io.containerd.kata.v2".to_string());
-            // Kata does not support --gpus all; pass NVIDIA GPUs as PCI devices
             let pci_devices = detect_nvidia_pci_devices();
             if !pci_devices.is_empty() {
                 for pci_id in &pci_devices {
@@ -475,9 +572,7 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, 
     docker_args.push("--cap-drop".to_string());
     docker_args.push("ALL".to_string());
     docker_args.push("-v".to_string());
-    docker_args.push(mount_ro);
-    docker_args.push("-v".to_string());
-    docker_args.push(mount_out);
+    docker_args.push(format!("{}:/workspace", volume));
     docker_args.push("-w".to_string());
     docker_args.push("/workspace".to_string());
     docker_args.push("-e".to_string());
@@ -496,7 +591,7 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, 
     }
 
     println!("Running Docker command: docker {}", docker_args.join(" "));
-    println!("Running job with runtime {:?}", runtime);
+    println!("Running job with runtime {:?}, volume {} timeout {}s", runtime, volume, timeout_secs);
 
     let mut child = Command::new("docker")
         .args(&docker_args)
@@ -505,35 +600,10 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, 
         .spawn()
         .context("failed to spawn docker")?;
 
-    // 10-minute timeout — Docker build/pull + execution
-    let max_wait = Duration::from_secs(600);
-    let start = Instant::now();
-
+    let started = std::time::Instant::now();
     let output = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let out = match child.wait_with_output() {
-                    Ok(out) => out,
-                    Err(e) => {
-                        eprintln!("warning: failed to read docker output: {}", e);
-                        Output { status, stdout: vec![], stderr: vec![] }
-                    }
-                };
-                break out;
-            }
-            Ok(None) => {
-                if start.elapsed() > max_wait {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(anyhow!("docker execution timed out after 600s"));
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(anyhow!("docker process error: {}", e));
-            }
+        if child.try_wait()?.is_some() {
+            break child.wait_with_output().context("failed to collect docker output")?;
         }
         if started.elapsed() > Duration::from_secs(timeout_secs) {
             let _ = child.kill();
@@ -550,11 +620,8 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, 
             ));
         }
         std::thread::sleep(Duration::from_secs(1));
-    }
+    };
 
-    let output = child
-        .wait_with_output()
-        .context("failed to collect docker output")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !stdout.trim().is_empty() {
@@ -564,17 +631,19 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, 
         eprintln!("Docker stderr: {}", stderr.trim());
     }
 
+    // Copy output back from Docker volume into LUKS workspace
+    extract_from_volume(&volume, "output", &workspace.join("output"))?;
+
+    // Clean up
+    let _ = remove_docker_volume(&volume);
+
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        eprintln!("Docker stdout:\n{}", stdout);
-        eprintln!("Docker stderr:\n{}", stderr);
         return Err(anyhow!(
-        "docker exited with code {:?}\nstdout:\n{}\nstderr:\n{}",
-        output.status.code(),
-        stdout,
-        stderr
-    ));
+            "docker exited with {:?}. stdout={} stderr={}",
+            output.status.code(),
+            stdout.trim(),
+            stderr.trim()
+        ));
     }
 
     Ok(())
