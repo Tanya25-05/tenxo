@@ -56,17 +56,17 @@ type Server struct {
 }
 
 type JobRequest struct {
-	EncryptedJobLink        string `json:"encrypted_job_link"`
-	JobLink                 string `json:"job_link"`
-	JobID                   string `json:"job_id"`
-	EncKeyB64               string `json:"enc_key_b64"`
-	SaltB64                 string `json:"salt_b64"`
-	GPUModel                string `json:"gpu_model"`
-	Script                  string `json:"script"`
-	Image                   string `json:"image"`
-	JobType                 string `json:"job_type,omitempty"`
-	NodeID                  string `json:"node_id"`
-	WorkspaceID             string `json:"workspace_id,omitempty"`
+	EncryptedJobLink         string `json:"encrypted_job_link"`
+	JobLink                  string `json:"job_link"`
+	JobID                    string `json:"job_id"`
+	EncKeyB64                string `json:"enc_key_b64"`
+	SaltB64                  string `json:"salt_b64"`
+	GPUModel                 string `json:"gpu_model"`
+	Script                   string `json:"script"`
+	Image                    string `json:"image"`
+	JobType                  string `json:"job_type,omitempty"`
+	NodeID                   string `json:"node_id"`
+	WorkspaceID              string `json:"workspace_id,omitempty"`
 	EncryptedWorkspaceKeyB64 string `json:"encrypted_workspace_key_b64,omitempty"`
 }
 
@@ -174,8 +174,8 @@ func main() {
 	http.HandleFunc("/my-nodes", cors(srv.authMiddleware(srv.handleMyNodes)))
 	http.HandleFunc("/presign", cors(srv.authMiddleware(srv.handlePresign)))
 	http.HandleFunc("/jobs/", cors(srv.authMiddleware(srv.handleJobStatus)))
-	http.HandleFunc("/storage/upload/", cors(srv.authMiddleware(srv.handleStorageUpload)))
-	http.HandleFunc("/storage/result-upload/", cors(srv.authMiddleware(srv.handleStorageResultUpload)))
+	http.HandleFunc("/storage/upload/", cors(srv.handleStorageUpload))
+	http.HandleFunc("/storage/result-upload/", cors(srv.handleStorageResultUpload))
 	http.HandleFunc("/storage/result/", cors(srv.authMiddleware(srv.handleStorageGet)))
 	http.HandleFunc("/storage/receipt/", cors(srv.authMiddleware(srv.handleStorageReceipt)))
 	http.HandleFunc("/ws", cors(srv.handleWS))
@@ -551,11 +551,19 @@ func (s *Server) r2Client(ctx context.Context) (*s3.Client, string, error) {
 	return client, bucket, nil
 }
 
-func (s *Server) getUploadURLs(ctx context.Context, jobID string, ttl time.Duration) (uploadURL, resultUploadURL, resultURL, downloadURL string, err error) {
+func newStorageToken() (string, error) {
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(tokenBytes), nil
+}
+
+func (s *Server) getUploadURLs(ctx context.Context, jobID string, ttl time.Duration) (uploadURL, resultUploadURL, resultURL, downloadURL, storageToken string, err error) {
 	client, bucket, err := s.r2Client(ctx)
 	public := getEnv("PUBLIC_API_URL", "http://localhost:8080")
 	if err != nil {
-		return "", "", "", "", err
+		return "", "", "", "", "", err
 	}
 	if client != nil {
 		uploadKey := fmt.Sprintf("jobs/%s.enc", jobID)
@@ -569,29 +577,33 @@ func (s *Server) getUploadURLs(ctx context.Context, jobID string, ttl time.Durat
 
 		putReq, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: &bucket, Key: &uploadKey})
 		if err != nil {
-			return "", "", "", "", err
+			return "", "", "", "", "", err
 		}
 		resultPutReq, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: &bucket, Key: &resultKey})
 		if err != nil {
-			return "", "", "", "", err
+			return "", "", "", "", "", err
 		}
 		getReq, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &resultKey})
 		if err != nil {
-			return "", "", "", "", err
+			return "", "", "", "", "", err
 		}
 		// Presigned GET URL for the job payload — agent needs this to download
 		downloadGetReq, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &uploadKey})
 		if err != nil {
-			return "", "", "", "", err
+			return "", "", "", "", "", err
 		}
-		return putReq.URL, resultPutReq.URL, getReq.URL, downloadGetReq.URL, nil
+		return putReq.URL, resultPutReq.URL, getReq.URL, downloadGetReq.URL, "", nil
 	}
 
-	uploadURL = fmt.Sprintf("%s/storage/upload/%s", public, jobID)
+	storageToken, err = newStorageToken()
+	if err != nil {
+		return "", "", "", "", "", err
+	}
+	uploadURL = fmt.Sprintf("%s/storage/upload/%s?token=%s", public, jobID, storageToken)
 	downloadURL = uploadURL
-	resultUploadURL = fmt.Sprintf("%s/storage/result-upload/%s", public, jobID)
+	resultUploadURL = fmt.Sprintf("%s/storage/result-upload/%s?token=%s", public, jobID, storageToken)
 	resultURL = fmt.Sprintf("%s/storage/result/%s", public, jobID)
-	return uploadURL, resultUploadURL, resultURL, downloadURL, nil
+	return uploadURL, resultUploadURL, resultURL, downloadURL, storageToken, nil
 }
 
 // parseAndValidateToken parses a JWT token string and returns the parsed token after validation
@@ -654,10 +666,24 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		jobLink = payload.JobLink
 	}
 
-	// Server-generated jobID — client-provided ID is ignored to prevent hijacking
-	jobID := fmt.Sprintf("job-%d", time.Now().UnixNano())
-
 	ctx := context.Background()
+	jobID := ""
+	if payload.JobID != "" {
+		candidateJobID := sanitizeJobID(payload.JobID)
+		if candidateJobID == "" {
+			http.Error(w, "invalid job_id", http.StatusBadRequest)
+			return
+		}
+		owner, err := s.st.JobGet(ctx, candidateJobID, "owner")
+		if err != nil || owner != userID {
+			http.Error(w, "invalid job_id", http.StatusForbidden)
+			return
+		}
+		jobID = candidateJobID
+	}
+	if jobID == "" {
+		jobID = fmt.Sprintf("job-%d", time.Now().UnixNano())
+	}
 
 	// Merge new fields into existing job hash (don't blow away presign data)
 	updates := map[string]string{
@@ -682,17 +708,23 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	if resultUploadURL == "" {
 		// If no presign was done, build a default result upload URL
 		public := getEnv("PUBLIC_API_URL", "http://localhost:8080")
-		resultUploadURL = fmt.Sprintf("%s/storage/result-upload/%s", public, jobID)
-		_ = s.st.JobSet(ctx, jobID, map[string]string{"result_upload_url": resultUploadURL})
+		storageToken, err := newStorageToken()
+		if err != nil {
+			http.Error(w, "failed to create result upload token", http.StatusInternalServerError)
+			return
+		}
+		resultUploadURL = fmt.Sprintf("%s/storage/result-upload/%s?token=%s", public, jobID, storageToken)
+		_ = s.st.JobSet(ctx, jobID, map[string]string{
+			"result_upload_url": resultUploadURL,
+			"storage_token":     storageToken,
+		})
 	}
 
 	// Use the presigned GET URL (download_url) for the agent instead of the
 	// presigned PUT URL (encrypted_job_link) — S3 presigned URLs are method-specific.
 	agentJobLink := jobLink
-	if payload.JobID != "" {
-		if dl, _ := s.st.JobGet(ctx, payload.JobID, "download_url"); dl != "" {
-			agentJobLink = dl
-		}
+	if dl, _ := s.st.JobGet(ctx, jobID, "download_url"); dl != "" {
+		agentJobLink = dl
 	}
 
 	msg := map[string]string{
@@ -1068,20 +1100,21 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 	ttl := time.Duration(req.TTLSeconds) * time.Second
 
 	ctx := context.Background()
-	uploadURL, resultUploadURL, resultURL, downloadURL, err := s.getUploadURLs(ctx, jobID, ttl)
+	uploadURL, resultUploadURL, resultURL, downloadURL, storageToken, err := s.getUploadURLs(ctx, jobID, ttl)
 	if err != nil {
 		http.Error(w, "failed to create presigned URLs: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	_ = s.st.JobSet(ctx, jobID, map[string]string{
-		"owner":              userID,
-		"status":             "created",
-		"upload_url":         uploadURL,
-		"download_url":       downloadURL,
-		"result_upload_url":  resultUploadURL,
-		"result_url":         resultURL,
-		"enc_key_b64":        keyB64,
+		"owner":             userID,
+		"status":            "created",
+		"upload_url":        uploadURL,
+		"download_url":      downloadURL,
+		"result_upload_url": resultUploadURL,
+		"result_url":        resultURL,
+		"enc_key_b64":       keyB64,
+		"storage_token":     storageToken,
 	})
 
 	resp := PresignResponse{
@@ -1096,13 +1129,31 @@ func (s *Server) handlePresign(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
-	userID, ok := r.Context().Value(userIDKey).(string)
-	if !ok || userID == "" {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+func (s *Server) authorizeStorageAccess(ctx context.Context, r *http.Request, jobID string) bool {
+	data, err := s.st.JobGetAll(ctx, jobID)
+	if err != nil || len(data) == 0 {
+		return false
 	}
 
+	if storageToken := data["storage_token"]; storageToken != "" && r.URL.Query().Get("token") == storageToken {
+		return true
+	}
+
+	userID, _ := r.Context().Value(userIDKey).(string)
+	if userID == "" {
+		authToken := extractToken(r)
+		if authToken != "" {
+			resolvedUserID, _, err := s.validateAuth(authToken)
+			if err == nil {
+				userID = resolvedUserID
+			}
+		}
+	}
+
+	return userID != "" && data["owner"] == userID
+}
+
+func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
 	rawID := strings.TrimPrefix(r.URL.Path, "/storage/upload/")
 	jobID := sanitizeJobID(rawID)
 	if jobID == "" {
@@ -1111,13 +1162,8 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	owner, err := s.st.JobGet(ctx, jobID, "owner")
-	if err != nil || owner == "" {
-		http.Error(w, "job not found", http.StatusNotFound)
-		return
-	}
-	if owner != userID {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if !s.authorizeStorageAccess(ctx, r, jobID) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -1172,12 +1218,6 @@ func (s *Server) handleStorageResultUpload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	userID, ok := r.Context().Value(userIDKey).(string)
-	if !ok || userID == "" {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	rawID := strings.TrimPrefix(r.URL.Path, "/storage/result-upload/")
 	jobID := sanitizeJobID(rawID)
 	if jobID == "" {
@@ -1186,13 +1226,8 @@ func (s *Server) handleStorageResultUpload(w http.ResponseWriter, r *http.Reques
 	}
 
 	ctx := r.Context()
-	owner, err := s.st.JobGet(ctx, jobID, "owner")
-	if err != nil || owner == "" {
-		http.Error(w, "job not found", http.StatusNotFound)
-		return
-	}
-	if owner != userID {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if !s.authorizeStorageAccess(ctx, r, jobID) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
