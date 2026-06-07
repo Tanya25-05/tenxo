@@ -48,6 +48,9 @@ PADDING_TRAILER_SIZE = 8
 # Plausible deniability: payload is padded to one of these sizes (in bytes)
 # Tiers are ordered from smallest to largest for efficient selection.
 PADDING_TIERS = [
+    64 * 1024,                 # 64 KB   — tiny scripts
+    256 * 1024,                # 256 KB  — most Python training scripts
+    1 * 1024 * 1024,           # 1 MB    — scripts + small assets
     16 * 1024 * 1024,          # 16 MB   — lightweight scripts / inference
     64 * 1024 * 1024,          # 64 MB   — small training jobs
     256 * 1024 * 1024,         # 256 MB  — medium workloads
