@@ -19,8 +19,8 @@ Security Model:
 from __future__ import annotations
 
 import base64
-import hmac
 import os
+import secrets
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -398,7 +398,7 @@ def verify_tee_quote(
     """
     # ── Check 1: report_data[0:32] contains raw agent pubkey ────────
     actual_report = quote.report_data[:32]
-    if not hmac.compare_digest(expected_pubkey, actual_report):
+    if not secrets.compare_digest(expected_pubkey, actual_report):
         raise ValueError(
             "TEE quote report_data does not match agent public key. "
             "Possible key substitution attack."
@@ -407,7 +407,7 @@ def verify_tee_quote(
     # ── Check 2: Verify measurement (if provided) ───────────────────
     if expected_measurement is not None:
         actual_measurement = quote.measurement
-        if not hmac.compare_digest(expected_measurement, actual_measurement):
+        if not secrets.compare_digest(expected_measurement, actual_measurement):
             raise ValueError(
                 "TEE measurement mismatch. The agent may not be running "
                 "the expected trusted code."

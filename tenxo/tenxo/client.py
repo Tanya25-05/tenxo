@@ -67,10 +67,24 @@ CONFIG_DIR = Path.home() / ".tenxo"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 
+def _coerce_json_object(value, *, label: str = "payload") -> dict:
+    """Return a JSON object from either a dict or a JSON-encoded string."""
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        if isinstance(decoded, dict):
+            return decoded
+        raise TypeError(f"{label} must be a JSON object, got {type(decoded).__name__}")
+    if isinstance(value, dict):
+        return value
+    raise TypeError(f"{label} must be a JSON object or encoded JSON object, got {type(value).__name__}")
+
+
 def _config() -> dict:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if CONFIG_PATH.is_file():
-        return json.loads(CONFIG_PATH.read_text())
+        return _coerce_json_object(CONFIG_PATH.read_text(), label="config")
     return {}
 
 
@@ -246,9 +260,14 @@ def perform_key_exchange(
                 with ws_client.connect(f"{ws_url}/signal/client?session={session_id}",
                                         close_timeout=10) as ws:
                     raw = ws.recv(timeout=15)
-                    msg = json.loads(raw)
+                    msg = _coerce_json_object(raw, label="WebSocket message")
+                    quote = None
                     if msg.get("type") == "tee_quote":
-                        quote = TeeQuote.deserialize(msg["payload"])
+                        quote = TeeQuote.deserialize(
+                            _coerce_json_object(msg["payload"], label="TEE quote payload")
+                        )
+                    if quote is None:
+                        raise ValueError(f"Expected tee_quote message, got {msg.get('type')!r}")
 
                     print("Verifying agent TEE attestation quote...")
                     report_data = quote.report_data
@@ -283,7 +302,9 @@ def perform_key_exchange(
                     session_data = session_resp.json()
                     quote_data = session_data.get("quote")
                     if quote_data:
-                        quote = TeeQuote.deserialize(quote_data)
+                        quote = TeeQuote.deserialize(
+                            _coerce_json_object(quote_data, label="REST TEE quote")
+                        )
                         report_data = quote.report_data
                         agent_pub_bytes = report_data[:32]
 
@@ -301,8 +322,8 @@ def perform_key_exchange(
                             timeout=10,
                         )
                         break
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"REST signaling failed (attempt {attempt+1}/{max_attempts}): {e}")
 
         if shared_secret is None and attempt < max_attempts - 1:
             wait = 2 * (attempt + 1)

@@ -674,8 +674,8 @@ fn build_docker_config(job_type: &str, config: &serde_json::Value) -> (String, V
                 .and_then(|v| v.as_str())
                 .unwrap_or("pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime");
                 let cmd = format!(
-            "ls -la /workspace && if [ -f requirements.txt ]; then pip install -r requirements.txt -q; fi; python {}",
-            script
+            "set -e; ls -la /workspace; if [ -f requirements.txt ]; then echo 'Installing dependencies...' && pip install -r requirements.txt; fi; echo '=== Running {} ===' && python {} && echo '=== Done ===' && echo 'Output directory: /workspace/output/' && ls -la /workspace/output/ 2>/dev/null || echo 'WARNING: /workspace/output/ not found — script did not produce output'",
+            script, script
         );
 
         (image.into(), vec!["bash".into(), "-c".into(), cmd])
@@ -735,6 +735,14 @@ fn create_luks_passphrase() -> Result<String> {
     let mut buf = [0u8; 32];
     OsRng.fill_bytes(&mut buf);
     Ok(hex::encode(buf))
+}
+
+/// Drop guard that stops the heartbeat thread when run_agent exits.
+struct HbGuard(Arc<AtomicBool>);
+impl Drop for HbGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
@@ -1048,8 +1056,29 @@ fn handle_job(
 
     if !zip_cmd.status.success() {
         fs::create_dir_all(&output_dir)?;
+
+        // Collect workspace listing for debugging
+        let mut workspace_contents = String::new();
+        let listing = Command::new("ls")
+            .arg("-laR")
+            .arg(&workspace)
+            .output()
+            .ok();
+        if let Some(l) = listing {
+            workspace_contents = String::from_utf8_lossy(&l.stdout).to_string();
+        }
+        let debug_info = format!(
+            "Job executed successfully but no output was found in /workspace/output/\n\
+             Make sure your script writes results to the 'output' subdirectory.\n\n\
+             ==================== Workspace contents ====================\n\
+             {workspace_contents}\n\
+             ===========================================================\n\
+             Your script: {script_name}\n\
+             Working dir: /workspace\n\
+             Output dir:  /workspace/output/"
+        );
         let placeholder = output_dir.join("result.txt");
-        fs::write(&placeholder, "Tenxo job completed successfully")?;
+        fs::write(&placeholder, &debug_info)?;
         Command::new("zip")
             .arg("-r")
             .arg(&result_zip_path)
@@ -1225,29 +1254,6 @@ fn main() -> Result<()> {
         .build()
         .context("failed to create HTTP client")?;
 
-    // ── Spawn heartbeat publisher (HTTP POST, runs across reconnects) ──
-    let hb_client = client.clone();
-    let hb_url = format!("{}/agent/heartbeat", matchmaker_url);
-    let hb_node = node_id.clone();
-    let hb_owner = owner.clone();
-    let hb_gpu_model = gpu_model.clone();
-    let hb_gpu_vram = gpu_vram_mb;
-    let hb_shutdown = shutdown.clone();
-    std::thread::spawn(move || {
-        while !hb_shutdown.load(Ordering::SeqCst) {
-            let hb = serde_json::json!({
-                "node_id": hb_node,
-                "status": "idle",
-                "owner": hb_owner,
-                "gpu_model": hb_gpu_model,
-                "gpu_vram_mb": hb_gpu_vram,
-                "tee_attested": true,
-            });
-            let _ = hb_client.post(&hb_url).json(&hb).send();
-            std::thread::sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-        }
-    });
-
     // ── Retry loop: reconnect on WS drop ──────────────────────────────
     let mut backoff: u64 = 1;
     while !shutdown.load(Ordering::SeqCst) {
@@ -1311,6 +1317,35 @@ fn run_agent(
         }
     });
     ws.send(Message::Text(serde_json::to_string(&reg_msg)?))?;
+
+    // ── Heartbeat thread: only active while WS is connected ─────────
+    let hb_shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let hb_shutdown = hb_shutdown.clone();
+        let hb_url = format!("{}/agent/heartbeat", matchmaker_url);
+        let hb_client = client.clone();
+        let hb_node = node_id.to_string();
+        let hb_owner = owner.to_string();
+        let hb_gpu_model = gpu_model.to_string();
+        let hb_gpu_vram = gpu_vram_mb;
+        std::thread::spawn(move || {
+            while !hb_shutdown.load(Ordering::SeqCst) {
+                let hb = serde_json::json!({
+                    "node_id": hb_node,
+                    "status": "idle",
+                    "owner": hb_owner,
+                    "gpu_model": hb_gpu_model,
+                    "gpu_vram_mb": hb_gpu_vram,
+                    "tee_attested": true,
+                });
+                let _ = hb_client.post(&hb_url).json(&hb).send();
+                std::thread::sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+            }
+        });
+    }
+
+    // Ensure heartbeat stops when run_agent exits
+    let _heartbeat_guard = HbGuard(hb_shutdown.clone());
 
     while !shutdown.load(Ordering::SeqCst) {
         let msg = match ws.read() {
