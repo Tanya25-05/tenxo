@@ -173,8 +173,9 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO jobs (job_id, owner, status, upload_url, result_upload_url, result_url,
 		                   receipt_upload_url, receipt_url, storage_token,
-		                   enc_key_b64, salt_b64, upload_path, result_path, gpu_model, gpu_vram_mb, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+		                   enc_key_b64, salt_b64, upload_path, result_path, gpu_model, gpu_vram_mb,
+		                   error, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
 		 ON CONFLICT (job_id) DO UPDATE SET
 		   owner=COALESCE(NULLIF($2,''), jobs.owner),
 		   status=COALESCE(NULLIF($3,''), jobs.status),
@@ -190,6 +191,7 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 		   result_path=COALESCE(NULLIF($13,''), jobs.result_path),
 		   gpu_model=COALESCE(NULLIF($14,''), jobs.gpu_model),
 		   gpu_vram_mb=CASE WHEN $15=0 THEN jobs.gpu_vram_mb ELSE $15 END,
+		   error=COALESCE(NULLIF($16,''), jobs.error),
 		   updated_at=NOW()`,
 		jobID,
 		fields["owner"],
@@ -206,6 +208,7 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 		fields["result_path"],
 		fields["gpu_model"],
 		parseIntField(fields["gpu_vram_mb"]),
+		fields["error"],
 	)
 	return err
 }
@@ -220,6 +223,7 @@ func (s *PGStore) JobGet(ctx context.Context, jobID, field string) (string, erro
 		"enc_key_b64":   true, "salt_b64": true,
 		"upload_path": true, "result_path": true,
 		"gpu_model": true, "gpu_vram_mb": true,
+		"error": true,
 	}
 	if !allowed[field] {
 		return "", fmt.Errorf("unknown job field: %s", field)
@@ -265,15 +269,15 @@ func (s *PGStore) ListJobsByOwner(ctx context.Context, owner string, limit int) 
 func (s *PGStore) JobGetAll(ctx context.Context, jobID string) (map[string]string, error) {
 	var owner, status, uploadURL, resultUploadURL, resultURL string
 	var receiptUploadURL, receiptURL, storageToken string
-	var encKeyB64, saltB64, uploadPath, resultPath string
+	var encKeyB64, saltB64, uploadPath, resultPath, errStr string
 	err := s.pool.QueryRow(ctx,
 		`SELECT owner, status, upload_url, result_upload_url, result_url,
 		        receipt_upload_url, receipt_url, storage_token,
-		        enc_key_b64, salt_b64, upload_path, result_path
+		        enc_key_b64, salt_b64, upload_path, result_path, error
 		 FROM jobs WHERE job_id=$1`,
 		jobID).Scan(&owner, &status, &uploadURL, &resultUploadURL, &resultURL,
 		&receiptUploadURL, &receiptURL, &storageToken,
-		&encKeyB64, &saltB64, &uploadPath, &resultPath)
+		&encKeyB64, &saltB64, &uploadPath, &resultPath, &errStr)
 	if err != nil {
 		return nil, err
 	}
@@ -290,6 +294,7 @@ func (s *PGStore) JobGetAll(ctx context.Context, jobID string) (map[string]strin
 		"salt_b64":           saltB64,
 		"upload_path":        uploadPath,
 		"result_path":        resultPath,
+		"error":              errStr,
 	}, nil
 }
 
