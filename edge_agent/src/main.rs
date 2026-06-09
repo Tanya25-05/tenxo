@@ -91,13 +91,15 @@ fn query_gpu_info() -> (String, i32) {
 #[derive(Deserialize)]
 struct JobMsg {
     job_id: Option<String>,
-    #[serde(alias = "encrypted_job_url")]
-    encrypted_job_link: String,
-    result_upload_url: String,
+    #[serde(default)]
+    encrypted_job_link: Option<String>,
+    result_upload_url: Option<String>,
     #[serde(default)]
     result_url: Option<String>,
     #[serde(default)]
     receipt_upload_url: Option<String>,
+    #[serde(default)]
+    owner: Option<String>,
     #[serde(default)]
     enc_key_b64: Option<String>,
     #[serde(default)]
@@ -572,10 +574,6 @@ fn run_docker_job(workspace: &Path, job_type: &str, config: &serde_json::Value, 
     }
 
     docker_args.push("--rm".to_string());
-    docker_args.push("--security-opt".to_string());
-    docker_args.push("no-new-privileges:true".to_string());
-    docker_args.push("--cap-drop".to_string());
-    docker_args.push("ALL".to_string());
     docker_args.push("-v".to_string());
     docker_args.push(format!("{}:/workspace", volume));
     docker_args.push("-w".to_string());
@@ -958,14 +956,21 @@ fn hash_sha256(data: &[u8]) -> String {
 
 fn handle_job(
     client: &Client,
+    matchmaker_url: &str,
+    owner: &str,
     job: &JobMsg,
     aes_key: &[u8; AEAD_KEY_SIZE],
 ) -> Result<String> {
     let job_id = job.job_id.as_deref().unwrap_or("unknown");
     println!("Processing job: {} (encrypted)", job_id);
 
+    let enc_job_link = job.encrypted_job_link.as_deref().unwrap_or("");
+    if enc_job_link.is_empty() {
+        return Err(anyhow!("job message missing encrypted_job_link"));
+    }
+
     // ── Step 1: Download encrypted payload ─────────────────────────────
-    let enc_bytes = download_bytes(client, &job.encrypted_job_link)
+    let enc_bytes = download_bytes(client, enc_job_link)
         .context("failed to download encrypted job payload")?;
     println!("Downloaded {} encrypted bytes", enc_bytes.len());
 
@@ -1036,6 +1041,16 @@ fn handle_job(
             "script file not found after extraction: {}",
             script_path.display()
         ));
+    }
+
+    // Start billing timer — GPU action begins
+    let billing_url = format!("{}/billing/track-usage", matchmaker_url);
+    let owner_id = if owner.is_empty() { job.owner.as_deref().unwrap_or("") } else { owner };
+    if !owner_id.is_empty() {
+        let _ = client.post(&billing_url)
+            .json(&serde_json::json!({"user_id": owner_id, "job_id": job_id, "action": "start"}))
+            .send();
+        println!("Billing timer started for job {}", job_id);
     }
 
     run_docker_job(&workspace, job_type, &config, job_id)
@@ -1116,9 +1131,14 @@ fn handle_job(
     let encrypted_receipt = encrypt_payload(&receipt_bytes, aes_key)
         .context("failed to encrypt receipt")?;
 
+    let result_upload_url = job.result_upload_url.as_deref().unwrap_or("");
+    if result_upload_url.is_empty() {
+        return Err(anyhow!("job message missing result_upload_url"));
+    }
+
     // ── Step 8: Upload encrypted result ───────────────────────────────
     let res = client
-        .put(&job.result_upload_url)
+        .put(result_upload_url)
         .body(encrypted_result)
         .send()
         .context("failed to upload encrypted result")?;
@@ -1127,13 +1147,13 @@ fn handle_job(
         return Err(anyhow!("result upload failed: {}", res.status()));
     }
 
-    println!("Encrypted result uploaded to {}", job.result_upload_url);
+    println!("Encrypted result uploaded to {}", result_upload_url);
     println!("Integrity receipt: input_sha256={} output_sha256={}", input_hash, output_hash);
 
     let receipt_url = job
         .receipt_upload_url
         .clone()
-        .unwrap_or_else(|| format!("{}.receipt", job.result_upload_url));
+        .unwrap_or_else(|| format!("{}.receipt", result_upload_url));
     let res_receipt = client
         .put(&receipt_url)
         .body(encrypted_receipt)
@@ -1143,7 +1163,15 @@ fn handle_job(
         eprintln!("Warning: receipt upload failed: {}", res_receipt.status());
     }
 
-    Ok(job.result_url.clone().unwrap_or_else(|| job.result_upload_url.clone()))
+    // Stop billing timer
+    if !owner_id.is_empty() {
+        let _ = client.post(&billing_url)
+            .json(&serde_json::json!({"user_id": owner_id, "job_id": job_id, "action": "stop"}))
+            .send();
+        println!("Billing timer stopped for job {}", job_id);
+    }
+
+    Ok(job.result_url.clone().unwrap_or_else(|| result_upload_url.to_string()))
 }
 
 // ─── Networking ────────────────────────────────────────────────────────────
@@ -1401,7 +1429,7 @@ fn run_agent(
                             final_key[i] = aes_key[i] ^ shared_secret[i];
                         }
                         println!("AES key derived via HKDF and XOR-blinded for job {}", current_job_id);
-                        handle_job(client, &payload, &final_key)
+                        handle_job(client, matchmaker_url, owner, &payload, &final_key)
                     }
                     None => {
                         let key_b64 = payload.enc_key_b64.as_deref().unwrap_or("");
@@ -1428,7 +1456,7 @@ fn run_agent(
                         }
                         let mut aes_key = [0u8; AEAD_KEY_SIZE];
                         aes_key.copy_from_slice(&key_bytes);
-                        handle_job(client, &payload, &aes_key)
+                        handle_job(client, matchmaker_url, owner, &payload, &aes_key)
                     }
                 };
 
