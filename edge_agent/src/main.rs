@@ -76,7 +76,11 @@ fn query_gpu_info() -> (String, i32) {
             if let Some(comma_pos) = line.find(',') {
                 let model = line[..comma_pos].trim().to_string();
                 let vram_str = line[comma_pos + 1..].trim();
-                let vram_mb: i32 = vram_str.parse().unwrap_or(0);
+                let vram_mb: i32 = vram_str.chars()
+                    .filter(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0);
                 return (model, vram_mb);
             } else {
                 return (line.to_string(), 0);
@@ -1287,7 +1291,9 @@ fn main() -> Result<()> {
                     "gpu_vram_mb": gpu_vram_mb,
                     "tee_attested": true,
                 });
-                let _ = hb_client.post(&hb_url).json(&hb).send();
+                if let Err(e) = hb_client.post(&hb_url).json(&hb).send() {
+                    eprintln!("heartbeat: HTTP POST to {} failed: {}", hb_url, e);
+                }
                 for _ in 0..HEARTBEAT_INTERVAL_SECS {
                     if shutdown.load(Ordering::SeqCst) { break; }
                     std::thread::sleep(Duration::from_secs(1));
@@ -1359,6 +1365,7 @@ fn run_agent(
         }
     });
     ws.send(Message::Text(serde_json::to_string(&reg_msg)?))?;
+
 
     while !shutdown.load(Ordering::SeqCst) {
         let msg = match ws.read() {
