@@ -65,25 +65,46 @@ const DEFAULT_DOCKER_TIMEOUT_SECS: u64 = 540;
 // ─── GPU Detection ──────────────────────────────────────────────────────────
 
 fn query_gpu_info() -> (String, i32) {
-    // Returns (gpu_model, vram_mb)
-    let output = Command::new("nvidia-smi")
+    // Try NVIDIA first
+    if let Ok(out) = Command::new("nvidia-smi")
         .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
+        .output()
+    {
+        if out.status.success() {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let line = stdout.lines().next().unwrap_or("").trim();
             if let Some(comma_pos) = line.find(',') {
                 let model = line[..comma_pos].trim().to_string();
                 let vram_str = line[comma_pos + 1..].trim();
                 let vram_mb: i32 = vram_str.parse().unwrap_or(0);
-                (model, vram_mb)
+                return (model, vram_mb);
             } else {
-                (line.to_string(), 0)
+                return (line.to_string(), 0);
             }
         }
-        _ => ("unknown".to_string(), 0),
     }
+    // Fallback to AMD
+    if let Ok(out) = Command::new("rocm-smi")
+        .args(["--showproductname"])
+        .output()
+    {
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let model = stdout.lines()
+                .find(|l| l.contains("GPU"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| "AMD GPU".into());
+            // rocm-smi doesn't give VRAM in a simple flag; parse from /sys if needed
+            let vram_mb = std::fs::read_to_string("/sys/class/drm/card0/device/mem_info_vram_total")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(|b| (b / 1024 / 1024) as i32)
+                .unwrap_or(0);
+            return (model, vram_mb);
+        }
+    }
+    ("CPU (no GPU detected)".into(), 0)
 }
 
 // ─── Data Structures ────────────────────────────────────────────────────────
@@ -737,14 +758,6 @@ fn create_luks_passphrase() -> Result<String> {
     Ok(hex::encode(buf))
 }
 
-/// Drop guard that stops the heartbeat thread when run_agent exits.
-struct HbGuard(Arc<AtomicBool>);
-impl Drop for HbGuard {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-}
-
 fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
     let output = Command::new(program)
         .args(args)
@@ -1254,7 +1267,36 @@ fn main() -> Result<()> {
         .build()
         .context("failed to create HTTP client")?;
 
-    // ── Retry loop: reconnect on WS drop ──────────────────────────────
+    // ── Phase 1: Registration (heartbeat — independent of WebSocket) ──
+    // Node appears as "idle" in marketplace from agent start.
+    // Heartbeat survives WS reconnects and shuts down only on SIGINT.
+    {
+        let hb_client = client.clone();
+        let hb_url = format!("{}/agent/heartbeat", matchmaker_url);
+        let hb_node = node_id.clone();
+        let hb_owner = owner.clone();
+        let hb_gpu_model = gpu_model.clone();
+        let shutdown = shutdown.clone();
+        std::thread::spawn(move || {
+            while !shutdown.load(Ordering::SeqCst) {
+                let hb = serde_json::json!({
+                    "node_id": hb_node,
+                    "status": "idle",
+                    "owner": hb_owner,
+                    "gpu_model": hb_gpu_model,
+                    "gpu_vram_mb": gpu_vram_mb,
+                    "tee_attested": true,
+                });
+                let _ = hb_client.post(&hb_url).json(&hb).send();
+                for _ in 0..HEARTBEAT_INTERVAL_SECS {
+                    if shutdown.load(Ordering::SeqCst) { break; }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        });
+    }
+
+    // ── Phase 2: Retry loop — WS key exchange + job execution ───────
     let mut backoff: u64 = 1;
     while !shutdown.load(Ordering::SeqCst) {
         println!("Tenxo Edge Agent connecting...");
@@ -1317,35 +1359,6 @@ fn run_agent(
         }
     });
     ws.send(Message::Text(serde_json::to_string(&reg_msg)?))?;
-
-    // ── Heartbeat thread: only active while WS is connected ─────────
-    let hb_shutdown = Arc::new(AtomicBool::new(false));
-    {
-        let hb_shutdown = hb_shutdown.clone();
-        let hb_url = format!("{}/agent/heartbeat", matchmaker_url);
-        let hb_client = client.clone();
-        let hb_node = node_id.to_string();
-        let hb_owner = owner.to_string();
-        let hb_gpu_model = gpu_model.to_string();
-        let hb_gpu_vram = gpu_vram_mb;
-        std::thread::spawn(move || {
-            while !hb_shutdown.load(Ordering::SeqCst) {
-                let hb = serde_json::json!({
-                    "node_id": hb_node,
-                    "status": "idle",
-                    "owner": hb_owner,
-                    "gpu_model": hb_gpu_model,
-                    "gpu_vram_mb": hb_gpu_vram,
-                    "tee_attested": true,
-                });
-                let _ = hb_client.post(&hb_url).json(&hb).send();
-                std::thread::sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-            }
-        });
-    }
-
-    // Ensure heartbeat stops when run_agent exits
-    let _heartbeat_guard = HbGuard(hb_shutdown.clone());
 
     while !shutdown.load(Ordering::SeqCst) {
         let msg = match ws.read() {
