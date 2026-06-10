@@ -424,10 +424,25 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 		switch wsMsg.Type {
 		case "heartbeat":
 			var hb struct {
-				NodeID string `json:"node_id"`
+				NodeID    string `json:"node_id"`
+				Status    string `json:"status"`
+				Owner     string `json:"owner"`
+				GPUModel  string `json:"gpu_model"`
+				GPUVRAMMB int    `json:"gpu_vram_mb"`
 			}
 			if err := json.Unmarshal(wsMsg.Payload, &hb); err == nil && hb.NodeID != "" {
 				nodeID = hb.NodeID
+				if ss.st != nil {
+					if hb.Status == "" {
+						hb.Status = "idle"
+					}
+					if hb.Owner == "" {
+						hb.Owner = "unknown"
+					}
+					if err := ss.st.SetNode(context.Background(), hb.NodeID, hb.Status, hb.Owner, hb.GPUModel, hb.GPUVRAMMB); err != nil {
+						log.Printf("signaling: heartbeat SetNode failed (%s): %v", hb.NodeID, err)
+					}
+				}
 				ensureSubscribed()
 			}
 		case "result":
