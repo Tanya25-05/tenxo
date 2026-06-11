@@ -449,6 +449,7 @@ func (ss *SessionStore) HandleAgentWS(w http.ResponseWriter, r *http.Request) {
 			ss.nc.Publish("jobs.results", wsMsg.Payload)
 			if ss.st != nil && nodeID != "" {
 				ss.st.SetNodeStatus(context.Background(), nodeID, "idle")
+				_ = ss.st.IncrNodeJobsCompleted(context.Background(), nodeID)
 				log.Printf("signaling: node %s returned to idle (result)", nodeID)
 			}
 		default:

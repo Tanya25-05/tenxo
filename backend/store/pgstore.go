@@ -36,6 +36,10 @@ func NewPGStore(ctx context.Context, databaseURL string) (*PGStore, error) {
 	return s, nil
 }
 
+func (s *PGStore) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
 func (s *PGStore) Migrate(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, schemaSQL)
 	return err
@@ -83,6 +87,47 @@ func (s *PGStore) SetNodeTEE(ctx context.Context, nodeID string) error {
 	return err
 }
 
+func (s *PGStore) SetNodePubKey(ctx context.Context, nodeID, pubKey string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO nodes (node_id, public_key, last_seen)
+		 VALUES ($1, $2, NOW())
+		 ON CONFLICT (node_id) DO UPDATE SET public_key=$2, last_seen=NOW()`,
+		nodeID, pubKey)
+	return err
+}
+
+func (s *PGStore) GetNodePubKey(ctx context.Context, nodeID string) (string, error) {
+	var pk string
+	err := s.pool.QueryRow(ctx,
+		`SELECT public_key FROM nodes WHERE node_id=$1 AND public_key!=''`,
+		nodeID).Scan(&pk)
+	if err != nil {
+		return "", err
+	}
+	return pk, nil
+}
+
+func (s *PGStore) IncrNodeJobsAssigned(ctx context.Context, nodeID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE nodes SET jobs_assigned=jobs_assigned+1 WHERE node_id=$1`,
+		nodeID)
+	return err
+}
+
+func (s *PGStore) IncrNodeJobsCompleted(ctx context.Context, nodeID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE nodes SET jobs_completed=jobs_completed+1 WHERE node_id=$1`,
+		nodeID)
+	return err
+}
+
+func (s *PGStore) UpdateNodeUptime(ctx context.Context, nodeID string, seconds int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE nodes SET uptime_seconds=uptime_seconds+$2 WHERE node_id=$1`,
+		nodeID, seconds)
+	return err
+}
+
 func (s *PGStore) GetNode(ctx context.Context, nodeID string) (string, error) {
 	var status string
 	err := s.pool.QueryRow(ctx,
@@ -108,6 +153,7 @@ func (s *PGStore) GetAllNodes(ctx context.Context) (map[string]*NodeInfo, error)
 	rows, err := s.pool.Query(ctx,
 		`SELECT node_id, status, owner, gpu_model, gpu_vram_mb,
 		        tee_attested, tee_last_attested,
+		        public_key, jobs_assigned, jobs_completed, uptime_seconds,
 		        EXTRACT(EPOCH FROM (last_seen + INTERVAL '60 seconds' - NOW()))::bigint AS ttl
 		 FROM nodes
 		 WHERE last_seen > NOW() - INTERVAL '90 seconds'`)
@@ -120,7 +166,9 @@ func (s *PGStore) GetAllNodes(ctx context.Context) (map[string]*NodeInfo, error)
 	for rows.Next() {
 		n := &NodeInfo{}
 		if err := rows.Scan(&n.NodeID, &n.Status, &n.Owner, &n.GPUModel, &n.GPUVRAMMB,
-			&n.TEEAttested, &n.TEEAttestedAt, &n.TTL); err != nil {
+			&n.TEEAttested, &n.TEEAttestedAt,
+			&n.PublicKey, &n.JobsAssigned, &n.JobsCompleted, &n.UptimeSeconds,
+			&n.TTL); err != nil {
 			return nil, err
 		}
 		if n.TTL < 0 {
@@ -135,6 +183,7 @@ func (s *PGStore) GetNodesByOwner(ctx context.Context, owner string) (map[string
 	rows, err := s.pool.Query(ctx,
 		`SELECT node_id, status, owner, gpu_model, gpu_vram_mb,
 		        tee_attested, tee_last_attested,
+		        public_key, jobs_assigned, jobs_completed, uptime_seconds,
 		        EXTRACT(EPOCH FROM (last_seen + INTERVAL '60 seconds' - NOW()))::bigint AS ttl
 		 FROM nodes
 		 WHERE owner=$1 AND last_seen > NOW() - INTERVAL '90 seconds'`,
@@ -148,7 +197,9 @@ func (s *PGStore) GetNodesByOwner(ctx context.Context, owner string) (map[string
 	for rows.Next() {
 		n := &NodeInfo{}
 		if err := rows.Scan(&n.NodeID, &n.Status, &n.Owner, &n.GPUModel, &n.GPUVRAMMB,
-			&n.TEEAttested, &n.TEEAttestedAt, &n.TTL); err != nil {
+			&n.TEEAttested, &n.TEEAttestedAt,
+			&n.PublicKey, &n.JobsAssigned, &n.JobsCompleted, &n.UptimeSeconds,
+			&n.TTL); err != nil {
 			return nil, err
 		}
 		if n.TTL < 0 {

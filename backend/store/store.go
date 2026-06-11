@@ -50,6 +50,10 @@ type NodeInfo struct {
 	GPUVRAMMB     int        `json:"gpu_vram_mb,omitempty"`
 	TEEAttested   bool       `json:"tee_attested"`
 	TEEAttestedAt *time.Time `json:"tee_last_attested,omitempty"`
+	PublicKey     string     `json:"public_key,omitempty"`
+	JobsAssigned  int        `json:"jobs_assigned"`
+	JobsCompleted int        `json:"jobs_completed"`
+	UptimeSeconds int64      `json:"uptime_seconds"`
 	TTL           int64      `json:"ttl_seconds"`
 }
 
@@ -63,12 +67,18 @@ type WorkspaceInfo struct {
 }
 
 type Store interface {
+	Ping(ctx context.Context) error
 	Migrate(ctx context.Context) error
 
 	SetNode(ctx context.Context, nodeID, status, owner, gpuModel string, gpuVRAMMB int) error
 	SetNodeStatus(ctx context.Context, nodeID, status string) error
 	SetNodeStatusIf(ctx context.Context, nodeID, status, expectedCurrent string) error
 	SetNodeTEE(ctx context.Context, nodeID string) error
+	SetNodePubKey(ctx context.Context, nodeID, pubKey string) error
+	GetNodePubKey(ctx context.Context, nodeID string) (string, error)
+	IncrNodeJobsAssigned(ctx context.Context, nodeID string) error
+	IncrNodeJobsCompleted(ctx context.Context, nodeID string) error
+	UpdateNodeUptime(ctx context.Context, nodeID string, seconds int64) error
 	GetNode(ctx context.Context, nodeID string) (status string, err error)
 	GetAllNodes(ctx context.Context) (map[string]*NodeInfo, error)
 	GetNodesByOwner(ctx context.Context, owner string) (map[string]*NodeInfo, error)

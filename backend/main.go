@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
@@ -77,6 +78,9 @@ type HeartbeatPayload struct {
 	GPUModel    string `json:"gpu_model"`
 	GPUVRAMMB   int    `json:"gpu_vram_mb"`
 	TEEAttested bool   `json:"tee_attested"`
+	PubKey      string `json:"pubkey,omitempty"`
+	Timestamp   int64  `json:"timestamp,omitempty"`
+	Signature   string `json:"signature,omitempty"`
 }
 
 type NodeInfo struct {
@@ -125,8 +129,21 @@ func main() {
 	}
 	defer st.Close()
 
-	// NATS
-	nc, err := nats.Connect(natsURL)
+	// NATS with reconnection resilience
+	nc, err := nats.Connect(natsURL,
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2*time.Second),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			log.Printf("nats disconnected: %v", err)
+		}),
+		nats.ReconnectHandler(func(c *nats.Conn) {
+			log.Printf("nats reconnected to %s", c.ConnectedUrl())
+		}),
+		nats.ClosedHandler(func(_ *nats.Conn) {
+			log.Printf("nats connection closed")
+		}),
+	)
 	if err != nil {
 		log.Fatalf("nats connect failed: %v", err)
 	}
@@ -164,6 +181,8 @@ func main() {
 
 	// Public endpoints (no auth required)
 	http.HandleFunc("/health", cors(handleHealth))
+	http.HandleFunc("/healthz", cors(handleHealth))
+	http.HandleFunc("/readyz", cors(srv.handleReadyz))
 	http.HandleFunc("/install.sh", cors(handleInstallSH))
 	http.HandleFunc("/docs", cors(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://tenxo.onrender.com/docs", http.StatusFound)
@@ -364,6 +383,48 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+
+	// Load existing pubkey; if none and the heartbeat carries one, trust on first use (TOFU)
+	storedPubKey, storeErr := s.st.GetNodePubKey(ctx, hb.NodeID)
+	if storeErr != nil || storedPubKey == "" {
+		if hb.PubKey == "" {
+			log.Printf("heartbeat: no pubkey for %s and none provided", hb.NodeID)
+			http.Error(w, "unauthorized: register pubkey first", http.StatusUnauthorized)
+			return
+		}
+		storedPubKey = hb.PubKey
+		if err := s.st.SetNodePubKey(ctx, hb.NodeID, hb.PubKey); err != nil {
+			log.Printf("heartbeat: failed to store pubkey for %s: %v", hb.NodeID, err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Verify ed25519 signature
+	if hb.Signature == "" || hb.Timestamp == 0 {
+		log.Printf("heartbeat: missing signature or timestamp from %s", hb.NodeID)
+		http.Error(w, "unauthorized: missing signature", http.StatusUnauthorized)
+		return
+	}
+	pubKeyRaw, err := base64.StdEncoding.DecodeString(storedPubKey)
+	if err != nil || len(pubKeyRaw) != ed25519.PublicKeySize {
+		log.Printf("heartbeat: invalid stored pubkey for %s", hb.NodeID)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	sigRaw, err := base64.StdEncoding.DecodeString(hb.Signature)
+	if err != nil || len(sigRaw) != ed25519.SignatureSize {
+		log.Printf("heartbeat: invalid signature encoding from %s", hb.NodeID)
+		http.Error(w, "bad request: invalid signature", http.StatusBadRequest)
+		return
+	}
+	msg := fmt.Sprintf("heartbeat:%s:%d", hb.NodeID, hb.Timestamp)
+	if !ed25519.Verify(ed25519.PublicKey(pubKeyRaw), []byte(msg), sigRaw) {
+		log.Printf("heartbeat: invalid signature for %s", hb.NodeID)
+		http.Error(w, "unauthorized: invalid signature", http.StatusUnauthorized)
+		return
+	}
+
 	if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner, hb.GPUModel, hb.GPUVRAMMB); err != nil {
 		log.Printf("heartbeat: failed to set node state for %s: %v", hb.NodeID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -813,9 +874,10 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mark the node as busy — it is now running a job
+	// Mark the node as busy and increment assigned count
 	if payload.NodeID != "" {
 		s.st.SetNodeStatus(ctx, payload.NodeID, "busy")
+		_ = s.st.IncrNodeJobsAssigned(ctx, payload.NodeID)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -972,6 +1034,25 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	if err := s.st.Ping(ctx); err != nil {
+		log.Printf("readyz: db ping failed: %v", err)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "reason": "database"})
+		return
+	}
+if s.nc.Status() != nats.CONNECTED {
+		log.Printf("readyz: nats not connected (status=%d)", s.nc.Status())
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "reason": "nats"})
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
 // ─── Signaling Routes (Zero-Knowledge ECDH Key Exchange) ───────────────────
 
 var signalStore *signaling.SessionStore
@@ -1026,6 +1107,38 @@ func (s *Server) listenHeartbeats(ctx context.Context) {
 		}
 		if hb.Owner == "" {
 			hb.Owner = "unknown"
+		}
+
+		// TOFU: store pubkey on first heartbeat via NATS
+		storedPubKey, storeErr := s.st.GetNodePubKey(ctx, hb.NodeID)
+		if storeErr != nil || storedPubKey == "" {
+			if hb.PubKey != "" {
+				storedPubKey = hb.PubKey
+				_ = s.st.SetNodePubKey(ctx, hb.NodeID, hb.PubKey)
+			}
+		}
+
+		// Verify ed25519 signature if pubkey is registered
+		if storedPubKey != "" {
+			if hb.Signature == "" || hb.Timestamp == 0 {
+				log.Printf("nats-heartbeat: missing signature from %s, skipping", hb.NodeID)
+				return
+			}
+			pubKeyRaw, err := base64.StdEncoding.DecodeString(storedPubKey)
+			if err != nil || len(pubKeyRaw) != ed25519.PublicKeySize {
+				log.Printf("nats-heartbeat: invalid stored pubkey for %s", hb.NodeID)
+				return
+			}
+			sigRaw, err := base64.StdEncoding.DecodeString(hb.Signature)
+			if err != nil || len(sigRaw) != ed25519.SignatureSize {
+				log.Printf("nats-heartbeat: invalid signature encoding from %s", hb.NodeID)
+				return
+			}
+			msg := fmt.Sprintf("heartbeat:%s:%d", hb.NodeID, hb.Timestamp)
+			if !ed25519.Verify(ed25519.PublicKey(pubKeyRaw), []byte(msg), sigRaw) {
+				log.Printf("nats-heartbeat: invalid signature for %s", hb.NodeID)
+				return
+			}
 		}
 
 		if err := s.st.SetNode(ctx, hb.NodeID, hb.Status, hb.Owner, hb.GPUModel, hb.GPUVRAMMB); err != nil {

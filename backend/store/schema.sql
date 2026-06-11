@@ -6,6 +6,10 @@ CREATE TABLE IF NOT EXISTS nodes (
     gpu_vram_mb INTEGER NOT NULL DEFAULT 0,
     tee_attested BOOLEAN NOT NULL DEFAULT FALSE,
     tee_last_attested TIMESTAMPTZ,
+    public_key TEXT NOT NULL DEFAULT '',
+    jobs_assigned INTEGER NOT NULL DEFAULT 0,
+    jobs_completed INTEGER NOT NULL DEFAULT 0,
+    uptime_seconds BIGINT NOT NULL DEFAULT 0,
     last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

@@ -25,6 +25,7 @@ func NewMockStore() *MockStore {
 	}
 }
 
+func (m *MockStore) Ping(ctx context.Context) error    { return nil }
 func (m *MockStore) Migrate(ctx context.Context) error { return nil }
 func (m *MockStore) Close()                            {}
 
@@ -131,6 +132,54 @@ func (m *MockStore) GetNodeOwner(ctx context.Context, nodeID string) (string, er
 		return "", errors.New("node not found")
 	}
 	return n.Owner, nil
+}
+
+func (m *MockStore) SetNodePubKey(ctx context.Context, nodeID, pubKey string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n, ok := m.nodes[nodeID]; ok {
+		n.PublicKey = pubKey
+	} else {
+		m.nodes[nodeID] = &NodeInfo{NodeID: nodeID, PublicKey: pubKey}
+	}
+	return nil
+}
+
+func (m *MockStore) GetNodePubKey(ctx context.Context, nodeID string) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n, ok := m.nodes[nodeID]
+	if !ok || n.PublicKey == "" {
+		return "", errors.New("pubkey not found")
+	}
+	return n.PublicKey, nil
+}
+
+func (m *MockStore) IncrNodeJobsAssigned(ctx context.Context, nodeID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n, ok := m.nodes[nodeID]; ok {
+		n.JobsAssigned++
+	}
+	return nil
+}
+
+func (m *MockStore) IncrNodeJobsCompleted(ctx context.Context, nodeID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n, ok := m.nodes[nodeID]; ok {
+		n.JobsCompleted++
+	}
+	return nil
+}
+
+func (m *MockStore) UpdateNodeUptime(ctx context.Context, nodeID string, seconds int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n, ok := m.nodes[nodeID]; ok {
+		n.UptimeSeconds += seconds
+	}
+	return nil
 }
 
 func (m *MockStore) ReapStaleNodes(ctx context.Context, maxAge time.Duration) error {
