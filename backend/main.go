@@ -476,6 +476,15 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if d, err := time.ParseDuration(value); err == nil {
+			return d
+		}
+	}
+	return fallback
+}
+
 type contextKey string
 
 const userIDKey contextKey = "user_id"
@@ -873,6 +882,10 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to enqueue job", http.StatusInternalServerError)
 		return
 	}
+
+	// Agent picked up the job — mark running so the stale-job reaper does not
+	// kill long-running ML workloads that are still executing on the provider.
+	_ = s.st.JobSet(ctx, jobID, map[string]string{"status": "running"})
 
 	// Mark the node as busy and increment assigned count
 	if payload.NodeID != "" {
@@ -1726,7 +1739,8 @@ func (s *Server) reapStaleJobs(ctx context.Context) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	const maxAge = 10 * time.Minute
+	// Must exceed AGENT_DOCKER_TIMEOUT_SECS (default 1800s) plus decrypt/LUKS/pull overhead.
+	maxAge := getEnvDuration("JOB_STALE_MAX_AGE", 60*time.Minute)
 
 	for range ticker.C {
 		reaped, err := s.st.ReapStaleJobs(ctx, maxAge)

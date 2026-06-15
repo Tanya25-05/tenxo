@@ -367,7 +367,7 @@ def cmd_run(
     path: str,
     api_url: str | None = None,
     api_key: str | None = None,
-    timeout: int = 600,
+    timeout: int = 1800,
     gpu_model: str | None = None,
     node_id: str | None = None,
     presign_ttl: int | None = None,
@@ -504,11 +504,12 @@ def cmd_run(
                 r = requests.get(status_url, headers=headers, timeout=10)
                 if r.status_code == 200:
                     sj = r.json()
-                    if sj.get("status") == "done":
+                    status = sj.get("status")
+                    if status in ("done", "result_uploaded"):
                         result_url = sj.get("result_url") or result_url
                         receipt_url = sj.get("receipt_url") or receipt_url
                         break
-                    elif sj.get("status") == "error":
+                    elif status in ("error", "failed"):
                         err = sj.get("error") or sj.get("message") or json.dumps(sj, sort_keys=True)
                         print(f"Job error: {err}")
                         sys.exit(1)

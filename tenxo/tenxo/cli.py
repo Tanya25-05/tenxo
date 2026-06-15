@@ -49,7 +49,7 @@ def main():
     run_p.add_argument("path", help="Path to workspace directory")
     run_p.add_argument("--api-url")
     run_p.add_argument("--api-key")
-    run_p.add_argument("--timeout", type=int, default=600)
+    run_p.add_argument("--timeout", type=int, default=1800)
     run_p.add_argument(
         "--gpu",
         dest="gpu_model",
