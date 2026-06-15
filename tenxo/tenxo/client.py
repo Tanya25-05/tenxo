@@ -494,30 +494,40 @@ def cmd_run(
         job_submit = resp.json()
         # Backend generates its own job_id (ignores client-provided one)
         job_id = job_submit.get("job_id", job_id)
-        print(f"Job submitted. Polling for result... (job_id: {job_id})")
+        print(f"Job submitted. Waiting for result... (job_id: {job_id})")
 
         # ── Step 8: Poll for result ────────────────────────────────────
         status_url = f"{api_url.rstrip('/')}/jobs/{job_id}/status"
         start = time.time()
+        last_status = None
+        poll_interval = 1.0
         while True:
+            elapsed = int(time.time() - start)
             try:
                 r = requests.get(status_url, headers=headers, timeout=10)
                 if r.status_code == 200:
                     sj = r.json()
-                    status = sj.get("status")
+                    status = sj.get("status") or "unknown"
+                    if status != last_status:
+                        print(f"  [{elapsed}s] job status: {status}")
+                        last_status = status
                     if status in ("done", "result_uploaded"):
                         result_url = sj.get("result_url") or result_url
                         receipt_url = sj.get("receipt_url") or receipt_url
                         break
-                    elif status in ("error", "failed"):
+                    if status in ("error", "failed"):
                         err = sj.get("error") or sj.get("message") or json.dumps(sj, sort_keys=True)
-                        print(f"Job error: {err}")
+                        print(f"Job failed after {elapsed}s: {err}")
                         sys.exit(1)
-            except Exception:
-                pass
-            time.sleep(2)
+                    if status in ("running", "queued", "uploaded", "created"):
+                        poll_interval = 1.0
+                elif r.status_code >= 500:
+                    print(f"  [{elapsed}s] status check unavailable ({r.status_code}), retrying...")
+            except requests.RequestException as exc:
+                print(f"  [{elapsed}s] status poll error: {exc}")
+            time.sleep(poll_interval)
             if time.time() - start > timeout:
-                print("Timeout waiting for job result")
+                print(f"Timeout waiting for job result after {timeout}s (last status: {last_status or 'unknown'})")
                 sys.exit(1)
 
         # ── Step 9: Download and verify integrity receipt ──────────────

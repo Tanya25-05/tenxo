@@ -83,6 +83,16 @@ type HeartbeatPayload struct {
 	Signature   string `json:"signature,omitempty"`
 }
 
+type JobResultPayload struct {
+	NodeID    string `json:"node_id"`
+	JobID     string `json:"job_id"`
+	Status    string `json:"status"`
+	ResultURL string `json:"result_url,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Timestamp int64  `json:"timestamp"`
+	Signature string `json:"signature"`
+}
+
 type NodeInfo struct {
 	NodeID        string     `json:"node_id"`
 	Status        string     `json:"status"`
@@ -202,6 +212,7 @@ func main() {
 	http.HandleFunc("/storage/receipt/", cors(srv.authMiddleware(srv.handleStorageReceipt)))
 	http.HandleFunc("/ws", cors(srv.handleWS))
 	http.HandleFunc("/agent/heartbeat", cors(srv.handleAgentHeartbeat))
+	http.HandleFunc("/agent/job-result", cors(srv.handleAgentJobResult))
 	http.HandleFunc("/workspace", cors(srv.authMiddleware(srv.handleWorkspace)))
 	http.HandleFunc("/workspace/", cors(srv.authMiddleware(srv.handleWorkspaceByID)))
 
@@ -433,6 +444,73 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if hb.TEEAttested {
 		_ = s.st.SetNodeTEE(ctx, hb.NodeID)
 	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) verifyAgentSignature(ctx context.Context, nodeID string, message string, signatureB64 string) bool {
+	if nodeID == "" || signatureB64 == "" {
+		return false
+	}
+	storedPubKey, err := s.st.GetNodePubKey(ctx, nodeID)
+	if err != nil || storedPubKey == "" {
+		log.Printf("job-result: no pubkey for %s", nodeID)
+		return false
+	}
+	pubKeyRaw, err := base64.StdEncoding.DecodeString(storedPubKey)
+	if err != nil || len(pubKeyRaw) != ed25519.PublicKeySize {
+		log.Printf("job-result: invalid stored pubkey for %s", nodeID)
+		return false
+	}
+	sigRaw, err := base64.StdEncoding.DecodeString(signatureB64)
+	if err != nil || len(sigRaw) != ed25519.SignatureSize {
+		log.Printf("job-result: invalid signature encoding from %s", nodeID)
+		return false
+	}
+	return ed25519.Verify(ed25519.PublicKey(pubKeyRaw), []byte(message), sigRaw)
+}
+
+func (s *Server) handleAgentJobResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload JobResultPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if payload.NodeID == "" || payload.JobID == "" || payload.Status == "" {
+		http.Error(w, "node_id, job_id, and status required", http.StatusBadRequest)
+		return
+	}
+	if payload.Timestamp == 0 || payload.Signature == "" {
+		http.Error(w, "unauthorized: missing signature", http.StatusUnauthorized)
+		return
+	}
+
+	ctx := r.Context()
+	msg := fmt.Sprintf("job-result:%s:%s:%s:%d", payload.NodeID, payload.JobID, payload.Status, payload.Timestamp)
+	if !s.verifyAgentSignature(ctx, payload.NodeID, msg, payload.Signature) {
+		http.Error(w, "unauthorized: invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	result := map[string]any{
+		"job_id":  payload.JobID,
+		"status":  payload.Status,
+		"node_id": payload.NodeID,
+	}
+	if payload.ResultURL != "" {
+		result["result_url"] = payload.ResultURL
+	}
+	if payload.Error != "" {
+		result["error"] = payload.Error
+	}
+	s.applyJobResult(ctx, result)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -1671,6 +1749,47 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
+func (s *Server) applyJobResult(ctx context.Context, payload map[string]any) {
+	jobID, _ := payload["job_id"].(string)
+	status, _ := payload["status"].(string)
+	resultURL, _ := payload["result_url"].(string)
+	nodeID, _ := payload["node_id"].(string)
+	if jobID == "" {
+		log.Printf("applyJobResult: result with empty job_id: %v", payload)
+		return
+	}
+	updates := map[string]string{}
+	if status != "" {
+		updates["status"] = status
+	}
+	if resultURL != "" {
+		updates["result_url"] = resultURL
+	}
+	switch e := payload["error"].(type) {
+	case string:
+		if e != "" {
+			updates["error"] = e
+		}
+	case nil:
+		// no error field, that's OK for "done" status
+	default:
+		updates["error"] = fmt.Sprintf("%v", e)
+	}
+	if len(updates) > 0 {
+		_ = s.st.JobSet(ctx, jobID, updates)
+	}
+	if nodeID != "" {
+		_ = s.st.SetNodeStatus(ctx, nodeID, "idle")
+		_ = s.st.IncrNodeJobsCompleted(ctx, nodeID)
+	}
+	owner, _ := s.st.JobGet(ctx, jobID, "owner")
+	if owner != "" {
+		notify, _ := json.Marshal(payload)
+		s.sendWS(owner, string(notify))
+	}
+	log.Printf("applyJobResult: job %s → status=%s err=%v", jobID, status, updates["error"])
+}
+
 func (s *Server) subscribeResults() {
 	sub, err := s.nc.Subscribe("jobs.results", func(msg *nats.Msg) {
 		var payload map[string]any
@@ -1678,39 +1797,7 @@ func (s *Server) subscribeResults() {
 			log.Printf("subscribeResults: failed to parse result: %v", err)
 			return
 		}
-		jobID, _ := payload["job_id"].(string)
-		status, _ := payload["status"].(string)
-		resultURL, _ := payload["result_url"].(string)
-		ctx := context.Background()
-		if jobID == "" {
-			log.Printf("subscribeResults: result with empty job_id: %s", string(msg.Data))
-			return
-		}
-		updates := map[string]string{}
-		if status != "" {
-			updates["status"] = status
-		}
-		if resultURL != "" {
-			updates["result_url"] = resultURL
-		}
-		switch e := payload["error"].(type) {
-		case string:
-			if e != "" {
-				updates["error"] = e
-			}
-		case nil:
-			// no error field, that's OK for "done" status
-		default:
-			updates["error"] = fmt.Sprintf("%v", e)
-		}
-		if len(updates) > 0 {
-			_ = s.st.JobSet(ctx, jobID, updates)
-		}
-		owner, _ := s.st.JobGet(ctx, jobID, "owner")
-		if owner != "" {
-			s.sendWS(owner, string(msg.Data))
-		}
-		log.Printf("subscribeResults: job %s → status=%s err=%v", jobID, status, updates["error"])
+		s.applyJobResult(context.Background(), payload)
 	})
 	if err != nil {
 		log.Printf("failed to subscribe to jobs.results: %v", err)

@@ -3,6 +3,7 @@ import sys
 import json
 import subprocess
 from pathlib import Path
+from urllib.request import urlretrieve
 
 dataset_url = os.environ.get(
     "DATASET_URL",
@@ -25,10 +26,8 @@ elif dataset_url.startswith("s3://"):
         check=True, capture_output=True, text=True,
     )
 else:
-    subprocess.run(
-        ["curl", "-sS", "-o", "iris.data", dataset_url],
-        check=True, capture_output=True, text=True,
-    )
+    print(f"Fetching dataset via urllib...")
+    urlretrieve(dataset_url, "iris.data")
 print("Dataset downloaded.")
 
 # ── Step 2: Load and prepare data ────────────────────────────────────
