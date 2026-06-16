@@ -39,6 +39,8 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS receipt_upload_url TEXT NOT NULL DEFAU
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS receipt_url TEXT NOT NULL DEFAULT '';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS storage_token TEXT NOT NULL DEFAULT '';
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS error TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS node_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS hourly_rate_cents INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_jobs_owner_updated_at ON jobs(owner, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_status_updated_at ON jobs(status, updated_at DESC);
 
@@ -75,8 +77,36 @@ CREATE TABLE IF NOT EXISTS usage_records (
     started_at TIMESTAMPTZ,
     stopped_at TIMESTAMPTZ,
     elapsed_seconds BIGINT NOT NULL DEFAULT 0,
+    gpu_model TEXT NOT NULL DEFAULT '',
+    hourly_rate_cents INTEGER NOT NULL DEFAULT 0,
+    provider_id TEXT NOT NULL DEFAULT '',
+    node_id TEXT NOT NULL DEFAULT '',
+    cost_cents BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, job_id)
 );
+
+ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS gpu_model TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS hourly_rate_cents INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS provider_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS node_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS cost_cents BIGINT NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS provider_earnings (
+    provider_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    renter_id TEXT NOT NULL DEFAULT '',
+    gpu_model TEXT NOT NULL DEFAULT '',
+    elapsed_seconds BIGINT NOT NULL DEFAULT 0,
+    gross_cents BIGINT NOT NULL DEFAULT 0,
+    earnings_cents BIGINT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    PRIMARY KEY (provider_id, job_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_earnings_provider_created
+    ON provider_earnings(provider_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS payment_transactions (
     id TEXT PRIMARY KEY,

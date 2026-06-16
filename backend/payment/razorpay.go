@@ -14,6 +14,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/gpu-grid/matchmaker/pricing"
 	"github.com/gpu-grid/matchmaker/store"
 )
 
@@ -157,7 +158,7 @@ func (h *BillingHandler) getOrCreateCustomer(ctx context.Context, userID, email 
 }
 
 func (h *BillingHandler) getTotalPaid(ctx context.Context, userID string) int64 {
-	_, paid, err := h.st.BillingGetTotal(ctx, userID)
+	_, paid, _, err := h.st.BillingGetTotal(ctx, userID)
 	if err != nil {
 		return 0
 	}
@@ -372,16 +373,22 @@ func (h *BillingHandler) HandleTrackUsage(w http.ResponseWriter, r *http.Request
 
 	switch req.Action {
 	case "start":
-		h.st.UsageStart(ctx, req.UserID, req.JobID)
+		_, err := StartJobBilling(ctx, h.st, req.UserID, req.JobID, "", "")
+		if err != nil {
+			http.Error(w, "failed to start tracking", http.StatusInternalServerError)
+			return
+		}
 		w.Write([]byte(`{"tracked": "start"}`))
 	case "stop":
-		elapsed, err := h.st.UsageStop(ctx, req.UserID, req.JobID)
+		result, err := StopJobBilling(ctx, h.st, h, req.UserID, req.JobID)
 		if err != nil {
+			http.Error(w, "failed to stop tracking", http.StatusInternalServerError)
+			return
+		}
+		if result.Skipped {
 			http.Error(w, "job not found", http.StatusNotFound)
 			return
 		}
-		h.st.BillingIncrGPU(ctx, req.UserID, elapsed)
-		h.autoChargeIfNeeded(ctx, req.UserID)
 		w.Write([]byte(`{"tracked": "stop"}`))
 	default:
 		http.Error(w, "invalid action", http.StatusBadRequest)
@@ -401,21 +408,16 @@ func (h *BillingHandler) HandleGetUsage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ctx := context.Background()
-	secs, paidCents, err := h.st.BillingGetTotal(ctx, userID)
-	var unpaid int64
-	if err == nil {
-		hourlyRate := int64(15)
-		chargeable := (secs * hourlyRate) / 3600
-		unpaid = chargeable - paidCents
-		if unpaid < 0 {
-			unpaid = 0
-		}
+	secs, _, unpaid, err := h.st.BillingGetTotal(ctx, userID)
+	if err != nil {
+		secs, unpaid = 0, 0
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"gpu_seconds":       secs,
 		"gpu_hours":         fmt.Sprintf("%.2f", float64(secs)/3600),
 		"unpaid_cents":      unpaid,
-		"hourly_rate_cents": 15,
+		"hourly_rate_cents": pricing.DefaultHourlyRateCents,
+		"skus":              pricing.PublicCatalog(),
 	})
 }
 
@@ -518,13 +520,10 @@ func (h *BillingHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 // ─── Internal ─────────────────────────────────────────────────────────────
 
 func (h *BillingHandler) autoChargeIfNeeded(ctx context.Context, userID string) {
-	gpuSecs, paid, err := h.st.BillingGetTotal(ctx, userID)
+	_, _, unpaid, err := h.st.BillingGetTotal(ctx, userID)
 	if err != nil {
 		return
 	}
-	hourlyRate := int64(15)
-	chargeable := (gpuSecs * hourlyRate) / 3600
-	unpaid := chargeable - paid
 
 	if unpaid >= 100 {
 		result, err := h.chargeUser(ctx, userID)
@@ -549,10 +548,8 @@ func (h *BillingHandler) chargeUser(ctx context.Context, userID string) (map[str
 		return nil, fmt.Errorf("no saved payment method for user %s", userID)
 	}
 
-	gpuSecs, paid, _ := h.st.BillingGetTotal(ctx, userID)
-	hourlyRate := int64(15)
-	chargeable := (gpuSecs * hourlyRate) / 3600
-	amountCents := chargeable - paid
+	_, _, unpaid, _ := h.st.BillingGetTotal(ctx, userID)
+	amountCents := unpaid
 	if amountCents < 50 {
 		amountCents = 50
 	}

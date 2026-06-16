@@ -100,7 +100,7 @@ func TestFullWorkflowE2E(t *testing.T) {
 	if owner != userA {
 		t.Fatalf("expected owner %s, got %s", userA, owner)
 	}
-	jobs, err := mock.ListJobsByOwner(context.Background(), userA, 10)
+	jobs, err := mock.ListJobsByOwner(context.Background(), userA, 10, 0)
 	if err != nil {
 		t.Fatal("ListJobsByOwner:", err)
 	}
@@ -202,14 +202,14 @@ func TestFullWorkflowE2E(t *testing.T) {
 	// ─── Step 7: Track billing / usage ─────────────────────────────
 	t.Log("=== Step 7: Per-second billing ===")
 
-	if err := mock.UsageStart(context.Background(), userA, jobID); err != nil {
+	if err := mock.UsageStart(context.Background(), userA, jobID, store.UsageMeta{HourlyRateCents: 15}); err != nil {
 		t.Fatal("UsageStart:", err)
 	}
 	t.Log("Usage tracking started for job", jobID)
 
 	time.Sleep(10 * time.Millisecond)
 
-	elapsed, err := mock.UsageStop(context.Background(), userA, jobID)
+	elapsed, _, _, _, err := mock.UsageStop(context.Background(), userA, jobID)
 	if err != nil {
 		t.Fatal("UsageStop:", err)
 	}

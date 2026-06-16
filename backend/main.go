@@ -34,6 +34,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/gpu-grid/matchmaker/payment"
+	"github.com/gpu-grid/matchmaker/pricing"
 	"github.com/gpu-grid/matchmaker/signaling"
 	"github.com/gpu-grid/matchmaker/store"
 )
@@ -47,10 +48,11 @@ func handleInstallSH(w http.ResponseWriter, r *http.Request) {
 }
 
 type Server struct {
-	nc   *nats.Conn
-	js   nats.JetStreamContext
-	st   store.Store
-	jwks keyfunc.Keyfunc
+	nc      *nats.Conn
+	js      nats.JetStreamContext
+	st      store.Store
+	billing *payment.BillingHandler
+	jwks    keyfunc.Keyfunc
 	// WebSocket clients keyed by userID
 	wsClients map[string]map[*websocket.Conn]bool
 	wsMu      sync.Mutex
@@ -101,6 +103,8 @@ type NodeInfo struct {
 	TEEAttested   bool       `json:"tee_attested"`
 	TEEAttestedAt *time.Time `json:"tee_last_attested,omitempty"`
 	TTL           int64      `json:"ttl_seconds"`
+	PricePerHour  float64    `json:"price_per_hour,omitempty"`
+	HourlyRateCents int64    `json:"hourly_rate_cents,omitempty"`
 }
 
 type PresignRequest struct {
@@ -183,7 +187,8 @@ func main() {
 		log.Printf("SUPABASE_JWKS_URL not set; JWT verification disabled")
 	}
 
-	srv := &Server{nc: nc, js: js, st: st, jwks: jwks, wsClients: make(map[string]map[*websocket.Conn]bool)}
+	paymentHandler := payment.NewBillingHandler(st)
+	srv := &Server{nc: nc, js: js, st: st, billing: paymentHandler, jwks: jwks, wsClients: make(map[string]map[*websocket.Conn]bool)}
 	go srv.listenHeartbeats(context.Background())
 	go srv.subscribeResults()
 	go srv.reapStaleJobs(context.Background())
@@ -203,6 +208,9 @@ func main() {
 	http.HandleFunc("/metrics", cors(srv.authMiddleware(srv.handleMetrics)))
 	http.HandleFunc("/nodes", cors(srv.authMiddleware(srv.handleNodes)))
 	http.HandleFunc("/my-nodes", cors(srv.authMiddleware(srv.handleMyNodes)))
+	http.HandleFunc("/gpu-skus", cors(srv.authMiddleware(srv.handleGPUSKUs)))
+	http.HandleFunc("/provider/earnings", cors(srv.authMiddleware(srv.handleProviderEarnings)))
+	http.HandleFunc("/billing/usage", cors(srv.authMiddleware(srv.handleBillingUsage)))
 	http.HandleFunc("/presign", cors(srv.authMiddleware(srv.handlePresign)))
 	http.HandleFunc("/jobs/", cors(srv.authMiddleware(srv.handleJobStatus)))
 	http.HandleFunc("/storage/upload/", cors(srv.handleStorageUpload))
@@ -226,7 +234,6 @@ func main() {
 	http.HandleFunc("/api/keys/", cors(srv.authMiddleware(srv.handleAPIKeyByHash)))
 
 	// Billing / Razorpay — Vast.ai/RunPod model (pay-as-you-go, card + UPI)
-	paymentHandler := payment.NewBillingHandler(st)
 	if paymentHandler.Enabled() {
 		http.HandleFunc("/billing/customer", cors(srv.authMiddleware(srv.withAuthenticatedBillingUser(paymentHandler.HandleCreateCustomer))))
 		http.HandleFunc("/billing/setup-intent", cors(srv.authMiddleware(srv.withAuthenticatedBillingUser(paymentHandler.HandleCreateSetupIntent))))
@@ -240,13 +247,7 @@ func main() {
 		})))
 		http.HandleFunc("/billing/track-usage", cors(srv.authMiddleware(srv.withAuthenticatedBillingUser(paymentHandler.HandleTrackUsage))))
 		http.HandleFunc("/billing/charge", cors(srv.authMiddleware(srv.withAuthenticatedBillingUser(paymentHandler.HandleCharge))))
-		http.HandleFunc("/billing/usage", cors(srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			userID, _ := r.Context().Value(userIDKey).(string)
-			q := r.URL.Query()
-			q.Set("user_id", userID)
-			r.URL.RawQuery = q.Encode()
-			paymentHandler.HandleGetUsage(w, r)
-		})))
+
 		http.HandleFunc("/billing/transactions", cors(srv.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			userID, _ := r.Context().Value(userIDKey).(string)
 			transactions, err := srv.st.BillingListTransactions(r.Context(), userID, 50)
@@ -794,13 +795,37 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		jobs, err := s.st.ListJobsByOwner(r.Context(), userID, limit)
+		if limit <= 0 {
+			limit = 10
+		}
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page <= 0 {
+			page = 1
+		}
+		offset := (page - 1) * limit
+
+		total, err := s.st.CountJobsByOwner(r.Context(), userID)
+		if err != nil {
+			http.Error(w, "failed to count jobs", http.StatusInternalServerError)
+			return
+		}
+		jobs, err := s.st.ListJobsByOwner(r.Context(), userID, limit, offset)
 		if err != nil {
 			http.Error(w, "failed to list jobs", http.StatusInternalServerError)
 			return
 		}
+		totalPages := (total + limit - 1) / limit
+		if totalPages == 0 {
+			totalPages = 1
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"jobs": jobs})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jobs":        jobs,
+			"total":       total,
+			"page":        page,
+			"limit":       limit,
+			"total_pages": totalPages,
+		})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -854,9 +879,20 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		"upload_url": jobLink,
 	}
 
-	if payload.GPUModel != "" {
-		updates["gpu_model"] = payload.GPUModel
+	gpuModel := payload.GPUModel
+	if gpuModel == "" && payload.NodeID != "" {
+		if node, err := s.st.GetNodeInfo(ctx, payload.NodeID); err == nil {
+			gpuModel = node.GPUModel
+		}
 	}
+	sku := pricing.MatchSKU(gpuModel)
+	if gpuModel != "" {
+		updates["gpu_model"] = gpuModel
+	}
+	if payload.NodeID != "" {
+		updates["node_id"] = payload.NodeID
+	}
+	updates["hourly_rate_cents"] = strconv.FormatInt(sku.HourlyRateCents, 10)
 	if payload.EncKeyB64 != "" {
 		updates["enc_key_b64"] = payload.EncKeyB64
 	}
@@ -971,9 +1007,20 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		_ = s.st.IncrNodeJobsAssigned(ctx, payload.NodeID)
 	}
 
+	billingInfo, billingErr := payment.StartJobBilling(ctx, s.st, userID, jobID, payload.NodeID, gpuModel)
+	if billingErr != nil {
+		log.Printf("handleJobs: billing start failed for %s: %v", jobID, billingErr)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "queued", "job_id": jobID, "subject": subject})
+	resp := map[string]any{
+		"status":  "queued",
+		"job_id":  jobID,
+		"subject": subject,
+		"billing": billingInfo,
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
@@ -1000,14 +1047,17 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		if n.Status != "idle" {
 			continue
 		}
+		sku := pricing.MatchSKU(n.GPUModel)
 		nodes = append(nodes, NodeInfo{
-			NodeID:        n.NodeID,
-			Status:        n.Status,
-			GPUModel:      n.GPUModel,
-			GPUVRAMMB:     n.GPUVRAMMB,
-			TEEAttested:   n.TEEAttested,
-			TEEAttestedAt: n.TEEAttestedAt,
-			TTL:           n.TTL,
+			NodeID:          n.NodeID,
+			Status:          n.Status,
+			GPUModel:        n.GPUModel,
+			GPUVRAMMB:       n.GPUVRAMMB,
+			TEEAttested:     n.TEEAttested,
+			TEEAttestedAt:   n.TEEAttestedAt,
+			TTL:             n.TTL,
+			PricePerHour:    sku.HourlyRateUSD,
+			HourlyRateCents: sku.HourlyRateCents,
 		})
 	}
 
@@ -1068,7 +1118,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to load node metrics", http.StatusInternalServerError)
 		return
 	}
-	jobs, err := s.st.ListJobsByOwner(ctx, userID, 100)
+	jobs, err := s.st.ListJobsByOwner(ctx, userID, 100, 0)
 	if err != nil {
 		http.Error(w, "failed to load job metrics", http.StatusInternalServerError)
 		return
@@ -1086,9 +1136,17 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		if model == "" {
 			model = "unknown"
 		}
+		sku := pricing.MatchSKU(model)
 		item, ok := gpuInventory[model]
 		if !ok {
-			item = map[string]any{"sku": model, "total": 0, "available": 0, "vram_mb": n.GPUVRAMMB}
+			item = map[string]any{
+				"sku":               model,
+				"total":             0,
+				"available":         0,
+				"vram_mb":           n.GPUVRAMMB,
+				"hourly_rate_cents": sku.HourlyRateCents,
+				"price_per_hour":    sku.HourlyRateUSD,
+			}
 			gpuInventory[model] = item
 		}
 		item["total"] = item["total"].(int) + 1
@@ -1784,6 +1842,11 @@ func (s *Server) applyJobResult(ctx context.Context, payload map[string]any) {
 	}
 	owner, _ := s.st.JobGet(ctx, jobID, "owner")
 	if owner != "" {
+		if status == "done" || status == "error" || status == "failed" {
+			if _, err := payment.StopJobBilling(ctx, s.st, s.billing, owner, jobID); err != nil {
+				log.Printf("applyJobResult: billing stop failed for %s: %v", jobID, err)
+			}
+		}
 		notify, _ := json.Marshal(payload)
 		s.sendWS(owner, string(notify))
 	}
@@ -1839,10 +1902,13 @@ func (s *Server) reapStaleJobs(ctx context.Context) {
 			log.Printf("reaper: marked stale job %s as failed", jobID)
 			owner, _ := s.st.JobGet(ctx, jobID, "owner")
 			if owner != "" {
+				if _, err := payment.StopJobBilling(ctx, s.st, s.billing, owner, jobID); err != nil {
+					log.Printf("reaper: billing stop failed for %s: %v", jobID, err)
+				}
 				failMsg, _ := json.Marshal(map[string]string{
 					"job_id": jobID,
 					"status": "error",
-					"error":  "job timed out — agent did not complete within 10 minutes",
+					"error":  "job timed out — agent did not complete within the allowed window",
 				})
 				s.sendWS(owner, string(failMsg))
 			}
@@ -1938,4 +2004,71 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+}
+
+func (s *Server) handleGPUSKUs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"skus": pricing.PublicCatalog()})
+}
+
+func (s *Server) handleProviderEarnings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	summary, err := s.st.GetProviderEarnings(r.Context(), userID)
+	if err != nil {
+		http.Error(w, "failed to load earnings", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"total_earnings_cents": summary.TotalEarningsCents,
+		"total_earnings_usd":   fmt.Sprintf("%.2f", float64(summary.TotalEarningsCents)/100),
+		"pending_cents":        summary.PendingCents,
+		"completed_jobs":       summary.CompletedJobs,
+		"active_jobs":          summary.ActiveJobs,
+		"provider_share_pct":   pricing.ProviderSharePercent,
+	})
+}
+
+func (s *Server) handleBillingUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	userID, ok := r.Context().Value(userIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.billing != nil && s.billing.Enabled() {
+		q := r.URL.Query()
+		q.Set("user_id", userID)
+		r.URL.RawQuery = q.Encode()
+		s.billing.HandleGetUsage(w, r)
+		return
+	}
+	ctx := r.Context()
+	secs, _, unpaid, err := s.st.BillingGetTotal(ctx, userID)
+	if err != nil {
+		secs, unpaid = 0, 0
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"gpu_seconds":       secs,
+		"gpu_hours":         fmt.Sprintf("%.2f", float64(secs)/3600),
+		"unpaid_cents":      unpaid,
+		"hourly_rate_cents": pricing.DefaultHourlyRateCents,
+		"skus":              pricing.PublicCatalog(),
+	})
 }

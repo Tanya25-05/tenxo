@@ -139,6 +139,27 @@ func (s *PGStore) GetNode(ctx context.Context, nodeID string) (string, error) {
 	return status, nil
 }
 
+func (s *PGStore) GetNodeInfo(ctx context.Context, nodeID string) (*NodeInfo, error) {
+	var n NodeInfo
+	err := s.pool.QueryRow(ctx,
+		`SELECT node_id, status, owner, gpu_model, gpu_vram_mb,
+		        tee_attested, tee_last_attested,
+		        public_key, jobs_assigned, jobs_completed, uptime_seconds,
+		        EXTRACT(EPOCH FROM (last_seen + INTERVAL '60 seconds' - NOW()))::bigint AS ttl
+		 FROM nodes WHERE node_id=$1`,
+		nodeID).Scan(&n.NodeID, &n.Status, &n.Owner, &n.GPUModel, &n.GPUVRAMMB,
+		&n.TEEAttested, &n.TEEAttestedAt,
+		&n.PublicKey, &n.JobsAssigned, &n.JobsCompleted, &n.UptimeSeconds,
+		&n.TTL)
+	if err != nil {
+		return nil, err
+	}
+	if n.TTL < 0 {
+		n.TTL = 0
+	}
+	return &n, nil
+}
+
 func (s *PGStore) GetNodeOwner(ctx context.Context, nodeID string) (string, error) {
 	var owner string
 	err := s.pool.QueryRow(ctx,
@@ -225,8 +246,8 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 		`INSERT INTO jobs (job_id, owner, status, upload_url, result_upload_url, result_url,
 		                   receipt_upload_url, receipt_url, storage_token,
 		                   enc_key_b64, salt_b64, upload_path, result_path, gpu_model, gpu_vram_mb,
-		                   error, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+		                   node_id, hourly_rate_cents, error, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW())
 		 ON CONFLICT (job_id) DO UPDATE SET
 		   owner=COALESCE(NULLIF($2,''), jobs.owner),
 		   status=COALESCE(NULLIF($3,''), jobs.status),
@@ -242,7 +263,9 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 		   result_path=COALESCE(NULLIF($13,''), jobs.result_path),
 		   gpu_model=COALESCE(NULLIF($14,''), jobs.gpu_model),
 		   gpu_vram_mb=CASE WHEN $15=0 THEN jobs.gpu_vram_mb ELSE $15 END,
-		   error=COALESCE(NULLIF($16,''), jobs.error),
+		   node_id=COALESCE(NULLIF($16,''), jobs.node_id),
+		   hourly_rate_cents=CASE WHEN $17=0 THEN jobs.hourly_rate_cents ELSE $17 END,
+		   error=COALESCE(NULLIF($18,''), jobs.error),
 		   updated_at=NOW()`,
 		jobID,
 		fields["owner"],
@@ -259,6 +282,8 @@ func (s *PGStore) JobSet(ctx context.Context, jobID string, fields map[string]st
 		fields["result_path"],
 		fields["gpu_model"],
 		parseIntField(fields["gpu_vram_mb"]),
+		fields["node_id"],
+		parseIntField(fields["hourly_rate_cents"]),
 		fields["error"],
 	)
 	return err
@@ -274,7 +299,8 @@ func (s *PGStore) JobGet(ctx context.Context, jobID, field string) (string, erro
 		"enc_key_b64":   true, "salt_b64": true,
 		"upload_path": true, "result_path": true,
 		"gpu_model": true, "gpu_vram_mb": true,
-		"error": true,
+		"node_id": true, "hourly_rate_cents": true,
+		"error": true, "download_url": true,
 	}
 	if !allowed[field] {
 		return "", fmt.Errorf("unknown job field: %s", field)
@@ -288,18 +314,29 @@ func (s *PGStore) JobGet(ctx context.Context, jobID, field string) (string, erro
 	return val, nil
 }
 
-func (s *PGStore) ListJobsByOwner(ctx context.Context, owner string, limit int) ([]JobInfo, error) {
+func (s *PGStore) ListJobsByOwner(ctx context.Context, owner string, limit, offset int) ([]JobInfo, error) {
 	if limit <= 0 || limit > 100 {
-		limit = 50
+		limit = 10
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT job_id, owner, status, upload_url, result_upload_url, result_url, receipt_url,
-		        gpu_model, gpu_vram_mb, created_at, updated_at
-		 FROM jobs
-		 WHERE owner=$1
-		 ORDER BY updated_at DESC
-		 LIMIT $2`,
-		owner, limit)
+		`SELECT j.job_id, j.owner, j.status, j.upload_url, j.result_upload_url, j.result_url, j.receipt_url,
+		        j.gpu_model, j.gpu_vram_mb, j.node_id, j.hourly_rate_cents, j.error, j.created_at, j.updated_at,
+		        COALESCE(
+		          CASE WHEN ur.stopped_at IS NULL AND ur.started_at IS NOT NULL
+		            THEN EXTRACT(EPOCH FROM NOW() - ur.started_at)::bigint
+		            ELSE ur.elapsed_seconds
+		          END, 0
+		        ) AS elapsed_seconds,
+		        COALESCE(ur.cost_cents, 0) AS cost_cents
+		 FROM jobs j
+		 LEFT JOIN usage_records ur ON ur.user_id = j.owner AND ur.job_id = j.job_id
+		 WHERE j.owner=$1
+		 ORDER BY j.updated_at DESC
+		 LIMIT $2 OFFSET $3`,
+		owner, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -308,27 +345,51 @@ func (s *PGStore) ListJobsByOwner(ctx context.Context, owner string, limit int) 
 	jobs := make([]JobInfo, 0)
 	for rows.Next() {
 		var j JobInfo
+		var costCents int64
 		if err := rows.Scan(&j.JobID, &j.Owner, &j.Status, &j.UploadURL, &j.ResultUploadURL,
-			&j.ResultURL, &j.ReceiptURL, &j.GPUModel, &j.GPUVRAMMB, &j.CreatedAt, &j.UpdatedAt); err != nil {
+			&j.ResultURL, &j.ReceiptURL, &j.GPUModel, &j.GPUVRAMMB, &j.NodeID, &j.HourlyRateCents,
+			&j.Error, &j.CreatedAt, &j.UpdatedAt, &j.ElapsedSeconds, &costCents); err != nil {
 			return nil, err
+		}
+		if j.EstimatedCostCents == 0 {
+			if costCents > 0 {
+				j.EstimatedCostCents = costCents
+			} else if j.HourlyRateCents > 0 && j.ElapsedSeconds > 0 {
+				j.EstimatedCostCents = (j.ElapsedSeconds * j.HourlyRateCents) / 3600
+				if j.EstimatedCostCents < 1 && j.ElapsedSeconds > 0 {
+					j.EstimatedCostCents = 1
+				}
+			}
 		}
 		jobs = append(jobs, j)
 	}
 	return jobs, rows.Err()
 }
 
+func (s *PGStore) CountJobsByOwner(ctx context.Context, owner string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE owner=$1`, owner).Scan(&count)
+	return count, err
+}
+
 func (s *PGStore) JobGetAll(ctx context.Context, jobID string) (map[string]string, error) {
 	var owner, status, uploadURL, resultUploadURL, resultURL string
 	var receiptUploadURL, receiptURL, storageToken string
 	var encKeyB64, saltB64, uploadPath, resultPath, errStr string
+	var gpuModel, nodeID string
+	var gpuVRAMMB, hourlyRateCents int
+	var createdAt, updatedAt time.Time
 	err := s.pool.QueryRow(ctx,
 		`SELECT owner, status, upload_url, result_upload_url, result_url,
 		        receipt_upload_url, receipt_url, storage_token,
-		        enc_key_b64, salt_b64, upload_path, result_path, error
+		        enc_key_b64, salt_b64, upload_path, result_path, error,
+		        gpu_model, gpu_vram_mb, node_id, hourly_rate_cents, created_at, updated_at
 		 FROM jobs WHERE job_id=$1`,
 		jobID).Scan(&owner, &status, &uploadURL, &resultUploadURL, &resultURL,
 		&receiptUploadURL, &receiptURL, &storageToken,
-		&encKeyB64, &saltB64, &uploadPath, &resultPath, &errStr)
+		&encKeyB64, &saltB64, &uploadPath, &resultPath, &errStr,
+		&gpuModel, &gpuVRAMMB, &nodeID, &hourlyRateCents, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -346,6 +407,12 @@ func (s *PGStore) JobGetAll(ctx context.Context, jobID string) (map[string]strin
 		"upload_path":        uploadPath,
 		"result_path":        resultPath,
 		"error":              errStr,
+		"gpu_model":          gpuModel,
+		"gpu_vram_mb":        strconv.Itoa(gpuVRAMMB),
+		"node_id":            nodeID,
+		"hourly_rate_cents":  strconv.Itoa(hourlyRateCents),
+		"created_at":         createdAt.Format(time.RFC3339),
+		"updated_at":         updatedAt.Format(time.RFC3339),
 	}, nil
 }
 
@@ -466,12 +533,12 @@ func (s *PGStore) BillingSetToken(ctx context.Context, userID, tokenID string) e
 	return err
 }
 
-func (s *PGStore) BillingGetTotal(ctx context.Context, userID string) (gpuSeconds, paidCents int64, err error) {
+func (s *PGStore) BillingGetTotal(ctx context.Context, userID string) (gpuSeconds, paidCents, unpaidCents int64, err error) {
 	err = s.pool.QueryRow(ctx,
-		`SELECT gpu_seconds, total_paid_cents FROM usage_totals WHERE user_id=$1`,
-		userID).Scan(&gpuSeconds, &paidCents)
+		`SELECT gpu_seconds, total_paid_cents, unpaid_cents FROM usage_totals WHERE user_id=$1`,
+		userID).Scan(&gpuSeconds, &paidCents, &unpaidCents)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	return
 }
@@ -484,6 +551,36 @@ func (s *PGStore) BillingIncrGPU(ctx context.Context, userID string, seconds int
 	return err
 }
 
+func (s *PGStore) BillingRecordUsage(ctx context.Context, userID, jobID string, seconds, costCents int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO usage_totals (user_id, gpu_seconds, unpaid_cents) VALUES ($1, $2, $3)
+		 ON CONFLICT (user_id) DO UPDATE SET
+		   gpu_seconds = usage_totals.gpu_seconds + $2,
+		   unpaid_cents = usage_totals.unpaid_cents + $3`,
+		userID, seconds, costCents)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO payment_transactions (id, user_id, job_id, type, amount_cents, gpu_seconds, status, completed_at)
+		 VALUES ($1, $2, $3, 'gpu_usage', $4, $5, 'completed', NOW())
+		 ON CONFLICT (id) DO UPDATE SET
+		   amount_cents = $4, gpu_seconds = $5, status = 'completed', completed_at = NOW()`,
+		fmt.Sprintf("usage_%s", jobID), userID, jobID, costCents, seconds)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (s *PGStore) BillingIncrPaid(ctx context.Context, userID string, cents int64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -492,7 +589,9 @@ func (s *PGStore) BillingIncrPaid(ctx context.Context, userID string, cents int6
 	defer tx.Rollback(ctx)
 	_, err = tx.Exec(ctx,
 		`INSERT INTO usage_totals (user_id, total_paid_cents) VALUES ($1, $2)
-		 ON CONFLICT (user_id) DO UPDATE SET total_paid_cents = usage_totals.total_paid_cents + $2`,
+		 ON CONFLICT (user_id) DO UPDATE SET
+		   total_paid_cents = usage_totals.total_paid_cents + $2,
+		   unpaid_cents = GREATEST(usage_totals.unpaid_cents - $2, 0)`,
 		userID, cents)
 	if err != nil {
 		return err
@@ -559,25 +658,81 @@ func (s *PGStore) BillingFindUserByCustomer(ctx context.Context, customerID stri
 	return userID, err
 }
 
-func (s *PGStore) UsageStart(ctx context.Context, userID, jobID string) error {
+func (s *PGStore) UsageStart(ctx context.Context, userID, jobID string, meta UsageMeta) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO usage_records (user_id, job_id, started_at) VALUES ($1, $2, NOW())
-		 ON CONFLICT (user_id, job_id) DO UPDATE SET started_at=NOW(), stopped_at=NULL, elapsed_seconds=0`,
-		userID, jobID)
+		`INSERT INTO usage_records (user_id, job_id, started_at, gpu_model, hourly_rate_cents, provider_id, node_id, cost_cents)
+		 VALUES ($1, $2, NOW(), $3, $4, $5, $6, 0)
+		 ON CONFLICT (user_id, job_id) DO UPDATE SET
+		   started_at=NOW(), stopped_at=NULL, elapsed_seconds=0, cost_cents=0,
+		   gpu_model=COALESCE(NULLIF($3,''), usage_records.gpu_model),
+		   hourly_rate_cents=CASE WHEN $4=0 THEN usage_records.hourly_rate_cents ELSE $4 END,
+		   provider_id=COALESCE(NULLIF($5,''), usage_records.provider_id),
+		   node_id=COALESCE(NULLIF($6,''), usage_records.node_id)`,
+		userID, jobID, meta.GPUModel, meta.HourlyRateCents, meta.ProviderID, meta.NodeID)
 	return err
 }
 
-func (s *PGStore) UsageStop(ctx context.Context, userID, jobID string) (elapsed int64, err error) {
+func (s *PGStore) UsageStop(ctx context.Context, userID, jobID string) (elapsed, hourlyRateCents int64, providerID, gpuModel string, err error) {
 	err = s.pool.QueryRow(ctx,
 		`UPDATE usage_records
-		 SET stopped_at=NOW(), elapsed_seconds=EXTRACT(EPOCH FROM NOW() - started_at)::bigint
+		 SET stopped_at=NOW(),
+		     elapsed_seconds=EXTRACT(EPOCH FROM NOW() - started_at)::bigint,
+		     cost_cents=(EXTRACT(EPOCH FROM NOW() - started_at)::bigint * hourly_rate_cents) / 3600
 		 WHERE user_id=$1 AND job_id=$2 AND stopped_at IS NULL
-		 RETURNING elapsed_seconds`,
-		userID, jobID).Scan(&elapsed)
+		 RETURNING elapsed_seconds, hourly_rate_cents, provider_id, gpu_model`,
+		userID, jobID).Scan(&elapsed, &hourlyRateCents, &providerID, &gpuModel)
 	if err != nil {
 		log.Printf("UsageStop: %s/%s: %v", userID, jobID, err)
 	}
 	return
+}
+
+func (s *PGStore) UsageIsActive(ctx context.Context, userID, jobID string) (bool, error) {
+	var active bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(
+		   SELECT 1 FROM usage_records
+		   WHERE user_id=$1 AND job_id=$2 AND started_at IS NOT NULL AND stopped_at IS NULL
+		 )`, userID, jobID).Scan(&active)
+	return active, err
+}
+
+func (s *PGStore) UsageElapsed(ctx context.Context, userID, jobID string) (int64, error) {
+	var elapsed int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT CASE
+		   WHEN stopped_at IS NOT NULL THEN elapsed_seconds
+		   WHEN started_at IS NOT NULL THEN EXTRACT(EPOCH FROM NOW() - started_at)::bigint
+		   ELSE 0
+		 END
+		 FROM usage_records WHERE user_id=$1 AND job_id=$2`,
+		userID, jobID).Scan(&elapsed)
+	return elapsed, err
+}
+
+func (s *PGStore) RecordProviderEarning(ctx context.Context, providerID, renterID, jobID, gpuModel string, elapsed, grossCents, earningsCents int64) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO provider_earnings (provider_id, job_id, renter_id, gpu_model, elapsed_seconds, gross_cents, earnings_cents, status, completed_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'completed', NOW())
+		 ON CONFLICT (provider_id, job_id) DO UPDATE SET
+		   renter_id=$3, gpu_model=$4, elapsed_seconds=$5, gross_cents=$6,
+		   earnings_cents=$7, status='completed', completed_at=NOW()`,
+		providerID, jobID, renterID, gpuModel, elapsed, grossCents, earningsCents)
+	return err
+}
+
+func (s *PGStore) GetProviderEarnings(ctx context.Context, providerID string) (ProviderEarningsSummary, error) {
+	var summary ProviderEarningsSummary
+	err := s.pool.QueryRow(ctx,
+		`SELECT
+		   COALESCE(SUM(earnings_cents), 0),
+		   COALESCE(SUM(CASE WHEN status='pending' THEN earnings_cents ELSE 0 END), 0),
+		   COUNT(*) FILTER (WHERE status='completed'),
+		   COUNT(*) FILTER (WHERE status='pending')
+		 FROM provider_earnings WHERE provider_id=$1`,
+		providerID).Scan(&summary.TotalEarningsCents, &summary.PendingCents,
+		&summary.CompletedJobs, &summary.ActiveJobs)
+	return summary, err
 }
 
 func (s *PGStore) WorkspaceSet(ctx context.Context, workspaceID string, fields map[string]string) error {
@@ -661,12 +816,6 @@ func (s *PGStore) ReapStaleJobs(ctx context.Context, maxAge time.Duration) ([]st
 		var jobID, owner string
 		if err := rows.Scan(&jobID, &owner); err != nil {
 			return reaped, err
-		}
-		// Close usage tracking so provider gets paid for partial work
-		if owner != "" {
-			if _, err := s.UsageStop(ctx, owner, jobID); err != nil {
-				log.Printf("reaper: UsageStop %s/%s: %v", owner, jobID, err)
-			}
 		}
 		reaped = append(reaped, jobID)
 	}

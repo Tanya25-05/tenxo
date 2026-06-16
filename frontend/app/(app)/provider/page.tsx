@@ -35,6 +35,8 @@ export default function ProviderDashboard() {
   const [myNodes, setMyNodes] = useState<Node[]>([]);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [earningsCents, setEarningsCents] = useState(0);
+  const [pendingCents, setPendingCents] = useState(0);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -46,9 +48,28 @@ export default function ProviderDashboard() {
   useEffect(() => {
     if (!session?.access_token) return;
     fetchMyNodes(session.access_token);
-    const timer = setInterval(() => fetchMyNodes(session.access_token), 10000);
+    fetchEarnings(session.access_token);
+    const timer = setInterval(() => {
+      fetchMyNodes(session.access_token);
+      fetchEarnings(session.access_token);
+    }, 10000);
     return () => clearInterval(timer);
   }, [session?.access_token]);
+
+  const fetchEarnings = async (token: string) => {
+    try {
+      const res = await fetch(`${API_URL}/provider/earnings`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setEarningsCents(data.total_earnings_cents ?? 0);
+        setPendingCents(data.pending_cents ?? 0);
+      }
+    } catch {
+      // silent
+    }
+  };
 
   const fetchMyNodes = async (token: string) => {
     try {
@@ -122,9 +143,13 @@ export default function ProviderDashboard() {
         />
         <MetricCard
           icon={Wallet}
-          label="Daily Earnings"
-          value="$0.00"
-          helper="Payout ledger pending marketplace settlement."
+          label="Total Earnings"
+          value={`$${(earningsCents / 100).toFixed(2)}`}
+          helper={
+            pendingCents > 0
+              ? `$${(pendingCents / 100).toFixed(2)} pending from active jobs (70% provider share).`
+              : "70% of renter GPU charges credited to your account."
+          }
         />
         <MetricCard
           icon={Timer}

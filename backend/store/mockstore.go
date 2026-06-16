@@ -100,6 +100,17 @@ func (m *MockStore) GetNode(ctx context.Context, nodeID string) (string, error) 
 	return n.Status, nil
 }
 
+func (m *MockStore) GetNodeInfo(ctx context.Context, nodeID string) (*NodeInfo, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n, ok := m.nodes[nodeID]
+	if !ok {
+		return nil, errors.New("node not found")
+	}
+	cp := *n
+	return &cp, nil
+}
+
 func (m *MockStore) GetAllNodes(ctx context.Context) (map[string]*NodeInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -233,11 +244,14 @@ func (m *MockStore) JobExists(ctx context.Context, jobID string) (bool, error) {
 	return ok, nil
 }
 
-func (m *MockStore) ListJobsByOwner(ctx context.Context, owner string, limit int) ([]JobInfo, error) {
+func (m *MockStore) ListJobsByOwner(ctx context.Context, owner string, limit, offset int) ([]JobInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if limit <= 0 || limit > 100 {
-		limit = 50
+		limit = 10
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	jobs := make([]JobInfo, 0)
 	now := time.Now()
@@ -254,15 +268,44 @@ func (m *MockStore) ListJobsByOwner(ctx context.Context, owner string, limit int
 			ResultURL:       fields["result_url"],
 			ReceiptURL:      fields["receipt_url"],
 			GPUModel:        fields["gpu_model"],
+			NodeID:          fields["node_id"],
+			HourlyRateCents: parseMockInt64(fields["hourly_rate_cents"]),
+			Error:           fields["error"],
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		})
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].JobID > jobs[j].JobID })
-	if len(jobs) > limit {
-		jobs = jobs[:limit]
+	if offset >= len(jobs) {
+		return []JobInfo{}, nil
 	}
-	return jobs, nil
+	end := offset + limit
+	if end > len(jobs) {
+		end = len(jobs)
+	}
+	return jobs[offset:end], nil
+}
+
+func (m *MockStore) CountJobsByOwner(ctx context.Context, owner string) (int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, fields := range m.jobs {
+		if fields["owner"] == owner {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func parseMockInt64(s string) int64 {
+	var n int64
+	for _, c := range s {
+		if c >= '0' && c <= '9' {
+			n = n*10 + int64(c-'0')
+		}
+	}
+	return n
 }
 
 func (m *MockStore) GetAPIKeyUser(ctx context.Context, keyHash string) (string, error) {
@@ -378,10 +421,13 @@ func (m *MockStore) BillingGetToken(ctx context.Context, userID string) (string,
 func (m *MockStore) BillingSetToken(ctx context.Context, userID, tokenID string) error {
 	return nil
 }
-func (m *MockStore) BillingGetTotal(ctx context.Context, userID string) (gpuSeconds, paidCents int64, err error) {
-	return 0, 0, nil
+func (m *MockStore) BillingGetTotal(ctx context.Context, userID string) (gpuSeconds, paidCents, unpaidCents int64, err error) {
+	return 0, 0, 0, nil
 }
 func (m *MockStore) BillingIncrGPU(ctx context.Context, userID string, seconds int64) error {
+	return nil
+}
+func (m *MockStore) BillingRecordUsage(ctx context.Context, userID, jobID string, seconds, costCents int64) error {
 	return nil
 }
 func (m *MockStore) BillingIncrPaid(ctx context.Context, userID string, cents int64) error {
@@ -398,9 +444,15 @@ func (m *MockStore) BillingListTransactions(ctx context.Context, userID string, 
 }
 
 type usageRecord struct {
-	UserID    string
-	JobID     string
-	StartTime time.Time
+	UserID          string
+	JobID           string
+	StartTime       time.Time
+	Stopped         bool
+	Elapsed         int64
+	GPUModel        string
+	HourlyRateCents int64
+	ProviderID      string
+	NodeID          string
 }
 
 var (
@@ -408,26 +460,60 @@ var (
 	usageStore = make(map[string]*usageRecord) // jobID -> record
 )
 
-func (m *MockStore) UsageStart(ctx context.Context, userID, jobID string) error {
+func (m *MockStore) UsageStart(ctx context.Context, userID, jobID string, meta UsageMeta) error {
 	usageMu.Lock()
 	defer usageMu.Unlock()
 	usageStore[jobID] = &usageRecord{
-		UserID:    userID,
-		JobID:     jobID,
-		StartTime: time.Now(),
+		UserID:          userID,
+		JobID:           jobID,
+		StartTime:       time.Now(),
+		GPUModel:        meta.GPUModel,
+		HourlyRateCents: meta.HourlyRateCents,
+		ProviderID:      meta.ProviderID,
+		NodeID:          meta.NodeID,
 	}
 	return nil
 }
 
-func (m *MockStore) UsageStop(ctx context.Context, userID, jobID string) (elapsed int64, err error) {
+func (m *MockStore) UsageStop(ctx context.Context, userID, jobID string) (elapsed, hourlyRateCents int64, providerID, gpuModel string, err error) {
+	usageMu.Lock()
+	defer usageMu.Unlock()
+	rec, ok := usageStore[jobID]
+	if !ok || rec.Stopped {
+		return 0, 0, "", "", errors.New("usage not started")
+	}
+	rec.Stopped = true
+	elapsed = int64(time.Since(rec.StartTime).Seconds())
+	rec.Elapsed = elapsed
+	return elapsed, rec.HourlyRateCents, rec.ProviderID, rec.GPUModel, nil
+}
+
+func (m *MockStore) UsageIsActive(ctx context.Context, userID, jobID string) (bool, error) {
+	usageMu.Lock()
+	defer usageMu.Unlock()
+	rec, ok := usageStore[jobID]
+	return ok && rec != nil && !rec.Stopped, nil
+}
+
+func (m *MockStore) UsageElapsed(ctx context.Context, userID, jobID string) (int64, error) {
 	usageMu.Lock()
 	defer usageMu.Unlock()
 	rec, ok := usageStore[jobID]
 	if !ok {
-		return 0, errors.New("usage not started")
+		return 0, errors.New("usage not found")
 	}
-	delete(usageStore, jobID)
+	if rec.Stopped {
+		return rec.Elapsed, nil
+	}
 	return int64(time.Since(rec.StartTime).Seconds()), nil
+}
+
+func (m *MockStore) RecordProviderEarning(ctx context.Context, providerID, renterID, jobID, gpuModel string, elapsed, grossCents, earningsCents int64) error {
+	return nil
+}
+
+func (m *MockStore) GetProviderEarnings(ctx context.Context, providerID string) (ProviderEarningsSummary, error) {
+	return ProviderEarningsSummary{}, nil
 }
 
 func (m *MockStore) ReapStaleJobs(ctx context.Context, maxAge time.Duration) ([]string, error) {

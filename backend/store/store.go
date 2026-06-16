@@ -17,17 +17,36 @@ type APIKeyInfo struct {
 }
 
 type JobInfo struct {
-	JobID           string    `json:"job_id"`
-	Owner           string    `json:"owner,omitempty"`
-	Status          string    `json:"status"`
-	UploadURL       string    `json:"upload_url,omitempty"`
-	ResultUploadURL string    `json:"result_upload_url,omitempty"`
-	ResultURL       string    `json:"result_url,omitempty"`
-	ReceiptURL      string    `json:"receipt_url,omitempty"`
-	GPUModel        string    `json:"gpu_model,omitempty"`
-	GPUVRAMMB       int       `json:"gpu_vram_mb,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	JobID              string    `json:"job_id"`
+	Owner              string    `json:"owner,omitempty"`
+	Status             string    `json:"status"`
+	UploadURL          string    `json:"upload_url,omitempty"`
+	ResultUploadURL    string    `json:"result_upload_url,omitempty"`
+	ResultURL          string    `json:"result_url,omitempty"`
+	ReceiptURL         string    `json:"receipt_url,omitempty"`
+	GPUModel           string    `json:"gpu_model,omitempty"`
+	GPUVRAMMB          int       `json:"gpu_vram_mb,omitempty"`
+	NodeID             string    `json:"node_id,omitempty"`
+	HourlyRateCents    int64     `json:"hourly_rate_cents,omitempty"`
+	EstimatedCostCents int64     `json:"estimated_cost_cents,omitempty"`
+	ElapsedSeconds     int64     `json:"elapsed_seconds,omitempty"`
+	Error              string    `json:"error,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+type UsageMeta struct {
+	GPUModel        string
+	HourlyRateCents int64
+	ProviderID      string
+	NodeID          string
+}
+
+type ProviderEarningsSummary struct {
+	TotalEarningsCents int64 `json:"total_earnings_cents"`
+	PendingCents       int64 `json:"pending_cents"`
+	CompletedJobs      int   `json:"completed_jobs"`
+	ActiveJobs         int   `json:"active_jobs"`
 }
 
 type TransactionInfo struct {
@@ -80,6 +99,7 @@ type Store interface {
 	IncrNodeJobsCompleted(ctx context.Context, nodeID string) error
 	UpdateNodeUptime(ctx context.Context, nodeID string, seconds int64) error
 	GetNode(ctx context.Context, nodeID string) (status string, err error)
+	GetNodeInfo(ctx context.Context, nodeID string) (*NodeInfo, error)
 	GetAllNodes(ctx context.Context) (map[string]*NodeInfo, error)
 	GetNodesByOwner(ctx context.Context, owner string) (map[string]*NodeInfo, error)
 	GetNodeOwner(ctx context.Context, nodeID string) (string, error)
@@ -89,7 +109,8 @@ type Store interface {
 	JobGet(ctx context.Context, jobID, field string) (string, error)
 	JobGetAll(ctx context.Context, jobID string) (map[string]string, error)
 	JobExists(ctx context.Context, jobID string) (bool, error)
-	ListJobsByOwner(ctx context.Context, owner string, limit int) ([]JobInfo, error)
+	ListJobsByOwner(ctx context.Context, owner string, limit, offset int) ([]JobInfo, error)
+	CountJobsByOwner(ctx context.Context, owner string) (int, error)
 
 	GetAPIKeyUser(ctx context.Context, keyHash string) (string, error)
 	SetAPIKey(ctx context.Context, keyHash, userID string) error
@@ -103,15 +124,21 @@ type Store interface {
 	BillingSetCustomer(ctx context.Context, userID, customerID string) error
 	BillingGetToken(ctx context.Context, userID string) (string, error)
 	BillingSetToken(ctx context.Context, userID, tokenID string) error
-	BillingGetTotal(ctx context.Context, userID string) (gpuSeconds, paidCents int64, err error)
+	BillingGetTotal(ctx context.Context, userID string) (gpuSeconds, paidCents, unpaidCents int64, err error)
 	BillingIncrGPU(ctx context.Context, userID string, seconds int64) error
+	BillingRecordUsage(ctx context.Context, userID, jobID string, seconds, costCents int64) error
 	BillingIncrPaid(ctx context.Context, userID string, cents int64) error
 	BillingSetLastCharge(ctx context.Context, userID string) error
 	BillingFindUserByCustomer(ctx context.Context, customerID string) (string, error)
 	BillingListTransactions(ctx context.Context, userID string, limit int) ([]TransactionInfo, error)
 
-	UsageStart(ctx context.Context, userID, jobID string) error
-	UsageStop(ctx context.Context, userID, jobID string) (elapsed int64, err error)
+	UsageStart(ctx context.Context, userID, jobID string, meta UsageMeta) error
+	UsageStop(ctx context.Context, userID, jobID string) (elapsed, hourlyRateCents int64, providerID, gpuModel string, err error)
+	UsageIsActive(ctx context.Context, userID, jobID string) (bool, error)
+	UsageElapsed(ctx context.Context, userID, jobID string) (int64, error)
+
+	RecordProviderEarning(ctx context.Context, providerID, renterID, jobID, gpuModel string, elapsed, grossCents, earningsCents int64) error
+	GetProviderEarnings(ctx context.Context, providerID string) (ProviderEarningsSummary, error)
 
 	ReapStaleJobs(ctx context.Context, maxAge time.Duration) ([]string, error)
 

@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowUpRight,
+  Check,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   Copy,
   Cpu,
@@ -14,14 +17,16 @@ import {
   Plus,
   ShieldCheck,
   Sparkles,
+  Terminal,
   Trash2,
+  X,
 } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { useNatsSocket, type JobUpdate } from "@/components/hooks/useNatsSocket";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+import { API_URL } from "@/lib/api";
+import { formatCents, formatHourlyRate, GPU_SKU_CATALOG, type GpuSku } from "@/lib/gpuSkus";
 
 interface Node {
   node_id: string;
@@ -31,6 +36,8 @@ interface Node {
   gpu_vram_mb?: number;
   tee_attested: boolean;
   tee_last_attested?: string;
+  price_per_hour?: number;
+  hourly_rate_cents?: number;
 }
 
 interface Pod {
@@ -39,6 +46,20 @@ interface Pod {
   gpu_model?: string;
   result_url?: string;
   updated_at?: string;
+  node_id?: string;
+  hourly_rate_cents?: number;
+  estimated_cost_cents?: number;
+  elapsed_seconds?: number;
+  error?: string;
+}
+
+interface JobDetails extends Pod {
+  owner?: string;
+  upload_url?: string;
+  result_upload_url?: string;
+  receipt_url?: string;
+  enc_key_b64?: string;
+  created_at?: string;
 }
 
 interface Metrics {
@@ -47,14 +68,17 @@ interface Metrics {
   total_vram_mb: number;
   jobs_total: number;
   jobs_active: number;
-  gpu_inventory: Array<{ sku: string; total: number; available: number; vram_mb: number }>;
+  gpu_inventory: Array<{
+    sku: string;
+    total: number;
+    available: number;
+    vram_mb: number;
+    price_per_hour?: number;
+    hourly_rate_cents?: number;
+  }>;
 }
 
-const gpuTiers = [
-  { id: "rtx-4090", name: "RTX 4090", memory: "24 GB", useCase: "Fine-tuning, inference", price: 0.15 },
-  { id: "a5000", name: "RTX A5000", memory: "24 GB", useCase: "Stable training runs", price: 0.22 },
-  { id: "a100", name: "A100", memory: "40 GB", useCase: "Large model training", price: 0.75 },
-];
+const JOBS_PER_PAGE = 10;
 
 export default function DeveloperDashboard() {
   const [session, setSession] = useState<any>(null);
@@ -66,9 +90,20 @@ export default function DeveloperDashboard() {
   const [networkNodes, setNetworkNodes] = useState<Node[]>([]);
   const [loadingNetwork, setLoadingNetwork] = useState(true);
   const [copied, setCopied] = useState(false);
-  const [selectedGpuId, setSelectedGpuId] = useState(gpuTiers[0].id);
+  const [gpuSkus, setGpuSkus] = useState<GpuSku[]>(GPU_SKU_CATALOG);
+  const [selectedGpuId, setSelectedGpuId] = useState(GPU_SKU_CATALOG[3]?.id ?? "rtx-4090");
   const [meterRunning, setMeterRunning] = useState(false);
   const [meterSeconds, setMeterSeconds] = useState(0);
+  const [jobsPage, setJobsPage] = useState(1);
+  const [jobsTotalPages, setJobsTotalPages] = useState(1);
+  const [jobsTotal, setJobsTotal] = useState(0);
+  const [unpaidCents, setUnpaidCents] = useState(0);
+  const [selectedPod, setSelectedPod] = useState<Pod | null>(null);
+  const [podDetails, setPodDetails] = useState<JobDetails | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [showCLIDialog, setShowCLIDialog] = useState(false);
+  const [cliNode, setCLINode] = useState<Node | null>(null);
+  const [cmdCopied, setCmdCopied] = useState(false);
   const [apiKeys, setApiKeys] = useState<any[]>([]);
   const [apiKeysLoading, setApiKeysLoading] = useState(true);
   const [newKey, setNewKey] = useState<string | null>(null);
@@ -84,46 +119,119 @@ export default function DeveloperDashboard() {
   useEffect(() => {
     if (!session?.access_token) return;
     fetchNetworkStatus(session.access_token);
-    fetchPods(session.access_token);
+    fetchPods(session.access_token, jobsPage);
     fetchAPIKeys(session.access_token);
     fetchMetrics(session.access_token);
+    fetchBilling(session.access_token);
+    fetchGpuSkus(session.access_token);
     const timer = setInterval(() => {
       fetchNetworkStatus(session.access_token);
-      fetchPods(session.access_token);
+      fetchPods(session.access_token, jobsPage);
       fetchMetrics(session.access_token);
+      fetchBilling(session.access_token);
     }, 10000);
     return () => clearInterval(timer);
-  }, [session?.access_token]);
+  }, [session?.access_token, jobsPage]);
 
   const handleJobUpdate = useCallback((update: JobUpdate) => {
     setPods((current) =>
       current.map((job) =>
         job.job_id === update.job_id
-          ? { ...job, status: update.status, result_url: update.result_url || job.result_url }
+          ? { ...job, status: update.status, result_url: update.result_url || job.result_url, error: update.error || job.error }
           : job,
       ),
     );
-  }, []);
+    if (update.status === "done" || update.status === "error" || update.status === "failed") {
+      const token = session?.access_token;
+      if (token) fetchBilling(token);
+    }
+  }, [session?.access_token]);
 
   const { status: socketStatus } = useNatsSocket({
     token: session?.access_token,
     onJobUpdate: handleJobUpdate,
   });
 
-  const fetchPods = async (token: string) => {
+  const fetchPods = async (token: string, page: number) => {
     try {
-      const res = await fetch(`${API_URL}/jobs`, {
+      const res = await fetch(`${API_URL}/jobs?page=${page}&limit=${JOBS_PER_PAGE}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         const data = await res.json();
         setPods(data.jobs || []);
+        setJobsTotal(data.total ?? 0);
+        setJobsTotalPages(data.total_pages ?? 1);
       }
     } catch {
       // silent
     } finally {
       setLoading(false);
     }
+  };
+
+  const fetchBilling = async (token: string) => {
+    try {
+      const res = await fetch(`${API_URL}/billing/usage`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setUnpaidCents(data.unpaid_cents ?? 0);
+      }
+    } catch {
+      // silent
+    }
+  };
+
+  const fetchGpuSkus = async (token: string) => {
+    try {
+      const res = await fetch(`${API_URL}/gpu-skus`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.skus?.length) setGpuSkus(data.skus);
+      }
+    } catch {
+      // silent
+    }
+  };
+
+  const openJobDetails = async (pod: Pod) => {
+    setSelectedPod(pod);
+    setPodDetails(null);
+    setDetailsLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/jobs/${pod.job_id}`, {
+        headers: { Authorization: `Bearer ${session?.access_token}` },
+      });
+      if (res.ok) {
+        setPodDetails(await res.json());
+      }
+    } catch {
+      // silent
+    } finally {
+      setDetailsLoading(false);
+    }
+  };
+
+  const closeJobDetails = () => {
+    setSelectedPod(null);
+    setPodDetails(null);
+  };
+
+  const openCLIDialog = (node?: Node) => {
+    setCLINode(node ?? networkNodes[0] ?? null);
+    setShowCLIDialog(true);
+    setCmdCopied(false);
+  };
+
+  const copyCommand = (text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCmdCopied(true);
+      setTimeout(() => setCmdCopied(false), 2000);
+    });
   };
 
   const fetchAPIKeys = async (token: string) => {
@@ -172,17 +280,19 @@ export default function DeveloperDashboard() {
     }
   };
 
-  const estimatedHourly = useMemo(
-    () => ((metrics?.nodes_available ?? networkNodes.length) * 0.15).toFixed(2),
-    [metrics?.nodes_available, networkNodes.length],
-  );
+  const estimatedHourly = useMemo(() => {
+    const nodes = networkNodes.length ? networkNodes : [];
+    if (!nodes.length) return "0.00";
+    const total = nodes.reduce((sum, n) => sum + (n.price_per_hour ?? (n.hourly_rate_cents ?? 15) / 100), 0);
+    return total.toFixed(2);
+  }, [networkNodes]);
   const selectedGpu = useMemo(
-    () => gpuTiers.find((t) => t.id === selectedGpuId) || gpuTiers[0],
-    [selectedGpuId],
+    () => gpuSkus.find((t) => t.id === selectedGpuId) || gpuSkus[0],
+    [selectedGpuId, gpuSkus],
   );
   const meteredCost = useMemo(
-    () => ((meterSeconds / 3600) * selectedGpu.price).toFixed(4),
-    [meterSeconds, selectedGpu.price],
+    () => ((meterSeconds / 3600) * (selectedGpu?.hourly_rate_usd ?? 0.15)).toFixed(4),
+    [meterSeconds, selectedGpu?.hourly_rate_usd],
   );
   const meterTime = useMemo(() => {
     const h = Math.floor(meterSeconds / 3600);
@@ -245,6 +355,20 @@ export default function DeveloperDashboard() {
 
       {activeTab === "pods" ? (
         <div className="space-y-6">
+          {unpaidCents > 0 && (
+            <div className="flex items-center justify-between gap-4 rounded-xl border border-amber-500/20 bg-amber-500/5 px-5 py-3">
+              <div className="flex items-center gap-2 text-sm text-amber-300">
+                <CreditCard className="size-4 shrink-0" />
+                <span>
+                  Outstanding balance: <strong>{formatCents(unpaidCents)}</strong> from GPU usage
+                </span>
+              </div>
+              <a href="/billing" className="text-xs font-medium text-amber-400 hover:text-amber-300">
+                Pay now →
+              </a>
+            </div>
+          )}
+
           {/* Metrics */}
           <section className="grid gap-4 sm:grid-cols-3">
             <MetricCard icon={Cpu} label="Available GPUs" value={loadingNetwork ? "..." : metrics?.nodes_available ?? networkNodes.length} helper={`${((metrics?.total_vram_mb ?? 0) / 1024).toFixed(0)} GB aggregate VRAM online.`} />
@@ -287,8 +411,8 @@ export default function DeveloperDashboard() {
 
             <div className="grid gap-0 lg:grid-cols-[1.25fr_0.75fr]">
               <div className="border-b border-white/[0.08] p-5 lg:border-b-0 lg:border-r">
-                <div className="space-y-2">
-                  {gpuTiers.map((tier) => (
+                <div className="space-y-2 max-h-80 overflow-y-auto">
+                  {gpuSkus.map((tier) => (
                     <button
                       key={tier.id}
                       onClick={() => setSelectedGpuId(tier.id)}
@@ -301,11 +425,11 @@ export default function DeveloperDashboard() {
                       <span>
                         <p className="text-sm font-medium text-white">{tier.name}</p>
                         <p className="mt-0.5 text-xs   text-text-tertiary">
-                          {tier.memory} VRAM &middot; {tier.useCase}
+                          {tier.memory_gb} GB VRAM &middot; {tier.use_case}
                         </p>
                       </span>
                       <span className="text-sm font-medium text-text-secondary">
-                        ${tier.price.toFixed(2)}/hr
+                        {formatHourlyRate(tier.hourly_rate_cents)}
                       </span>
                     </button>
                   ))}
@@ -317,7 +441,7 @@ export default function DeveloperDashboard() {
                   <p className="text-[10px] font-semibold tracking-widest   text-text-tertiary uppercase">
                     Current meter
                   </p>
-                  <h3 className="mt-1 text-lg font-semibold text-white">{selectedGpu.name}</h3>
+                  <h3 className="mt-1 text-lg font-semibold text-white">{selectedGpu?.name ?? "GPU"}</h3>
                 </div>
                 <div className="mt-6 flex items-center gap-2 font-mono text-2xl font-semibold tracking-tight text-white">
                   <Clock3 className="size-5   text-text-tertiary" />
@@ -329,7 +453,7 @@ export default function DeveloperDashboard() {
                 </div>
                 <div className="mt-4 flex items-start gap-2 text-[11px]   text-text-tertiary">
                   <Gauge className="mt-0.5 size-3.5 shrink-0" />
-                  <span>Charges scale with active runtime. Production billing should be backed by server-side pod events.</span>
+                  <span>Server-side billing tracks each job automatically when it starts running on a provider GPU.</span>
                 </div>
               </div>
             </div>
@@ -348,11 +472,11 @@ export default function DeveloperDashboard() {
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button variant="secondary" size="sm">
+                <Button variant="secondary" size="sm" onClick={() => openCLIDialog()}>
                   <ArrowUpRight className="size-3.5" />
                   CLI deploy
                 </Button>
-                <Button variant="primary" size="sm">
+                <Button variant="primary" size="sm" onClick={() => openCLIDialog(networkNodes[0])}>
                   <Plus className="size-3.5" />
                   Deploy pod
                 </Button>
@@ -372,23 +496,67 @@ export default function DeveloperDashboard() {
                 </p>
               </div>
             ) : (
-              <div className="divide-y divide-white/[0.06]">
-                {pods.map((pod) => (
-                  <div key={pod.job_id} className="flex flex-col gap-4 p-5 transition-colors hover:bg-white/[0.02] sm:flex-row sm:items-center sm:justify-between">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="size-1.5 rounded-full bg-emerald-500/70" />
-                        <p className="text-sm font-medium text-white">{pod.gpu_model || "Tenxo job"}</p>
+              <>
+                <div className="divide-y divide-white/[0.06]">
+                  {pods.map((pod) => (
+                    <div key={pod.job_id} className="flex flex-col gap-4 p-5 transition-colors hover:bg-white/[0.02] sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`size-1.5 rounded-full ${pod.status === "running" || pod.status === "queued" ? "bg-emerald-500/70" : pod.status === "done" ? "bg-blue-500/70" : "bg-amber-500/70"}`} />
+                          <p className="text-sm font-medium text-white">{pod.gpu_model || "Tenxo job"}</p>
+                          {pod.hourly_rate_cents ? (
+                            <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-text-tertiary">
+                              {formatHourlyRate(pod.hourly_rate_cents)}
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="mt-1 truncate font-mono text-xs text-text-tertiary">
+                          {pod.job_id} · {pod.status}
+                          {pod.elapsed_seconds ? ` · ${formatElapsed(pod.elapsed_seconds)}` : ""}
+                        </p>
                       </div>
-                      <p className="mt-1 truncate font-mono text-xs   text-text-tertiary">{pod.job_id} · {pod.status}</p>
+                      <div className="flex items-center gap-3">
+                        {(pod.estimated_cost_cents ?? 0) > 0 && (
+                          <span className="text-sm font-medium text-text-secondary">
+                            {formatCents(pod.estimated_cost_cents!)}
+                          </span>
+                        )}
+                        <Button variant="ghost" size="sm" onClick={() => openJobDetails(pod)}>
+                          <Play className="size-3.5" />
+                          Details
+                        </Button>
+                      </div>
                     </div>
-                    <Button variant="ghost" size="sm">
-                      <Play className="size-3.5" />
-                      Details
-                    </Button>
+                  ))}
+                </div>
+                {jobsTotalPages > 1 && (
+                  <div className="flex items-center justify-between border-t border-white/[0.08] px-5 py-4">
+                    <p className="text-xs text-text-tertiary">
+                      Page {jobsPage} of {jobsTotalPages} · {jobsTotal} jobs
+                    </p>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={jobsPage <= 1}
+                        onClick={() => setJobsPage((p) => Math.max(1, p - 1))}
+                      >
+                        <ChevronLeft className="size-3.5" />
+                        Prev
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={jobsPage >= jobsTotalPages}
+                        onClick={() => setJobsPage((p) => p + 1)}
+                      >
+                        Next
+                        <ChevronRight className="size-3.5" />
+                      </Button>
+                    </div>
                   </div>
-                ))}
-              </div>
+                )}
+              </>
             )}
           </section>
 
@@ -447,7 +615,13 @@ export default function DeveloperDashboard() {
                             </span>
                           )}
                         </td>
-                        <td className="px-6 py-3 text-xs text-text-secondary">$0.15</td>
+                        <td className="px-6 py-3 text-xs text-text-secondary">
+                          {node.price_per_hour
+                            ? `$${node.price_per_hour.toFixed(2)}`
+                            : node.hourly_rate_cents
+                              ? formatHourlyRate(node.hourly_rate_cents)
+                              : "$0.15"}
+                        </td>
                         <td className="px-6 py-3 text-xs   text-text-tertiary">Ready for match</td>
                       </tr>
                     ))
@@ -462,7 +636,10 @@ export default function DeveloperDashboard() {
                   {metrics.gpu_inventory.map((sku) => (
                     <div key={sku.sku} className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
                       <p className="text-sm font-medium text-white">{sku.sku}</p>
-                      <p className="mt-1 text-xs text-text-tertiary">{sku.available}/{sku.total} available · {(sku.vram_mb / 1024).toFixed(0)} GB VRAM</p>
+                      <p className="mt-1 text-xs text-text-tertiary">
+                        {sku.available}/{sku.total} available · {(sku.vram_mb / 1024).toFixed(0)} GB VRAM
+                        {sku.price_per_hour ? ` · $${sku.price_per_hour.toFixed(2)}/hr` : ""}
+                      </p>
                     </div>
                   ))}
                 </div>
@@ -546,6 +723,178 @@ export default function DeveloperDashboard() {
           </section>
         </div>
       )}
+
+      {/* Job Details Dialog */}
+      {selectedPod && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          role="dialog"
+          aria-modal="true"
+          onKeyDown={(e) => e.key === "Escape" && closeJobDetails()}
+        >
+          <div className="w-full max-w-lg rounded-2xl border border-white/[0.08] bg-[#0c0c0f] p-6 shadow-2xl">
+            <div className="mb-5 flex items-start justify-between">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-text-tertiary">Job Details</p>
+                <h2 className="mt-1 text-base font-semibold text-white">{selectedPod.gpu_model || "Compute job"}</h2>
+                <p className="mt-0.5 font-mono text-[11px] text-text-tertiary">{selectedPod.job_id}</p>
+              </div>
+              <button onClick={closeJobDetails} className="rounded-lg p-1.5 text-text-tertiary hover:bg-white/[0.06]">
+                <X className="size-4" />
+              </button>
+            </div>
+
+            {detailsLoading ? (
+              <p className="py-8 text-center text-xs text-text-tertiary">Loading job details...</p>
+            ) : (
+              <div className="space-y-4">
+                <DetailRow label="Status" value={podDetails?.status || selectedPod.status} />
+                <DetailRow label="GPU" value={podDetails?.gpu_model || selectedPod.gpu_model || "—"} />
+                {selectedPod.hourly_rate_cents || podDetails?.hourly_rate_cents ? (
+                  <DetailRow label="Rate" value={formatHourlyRate(selectedPod.hourly_rate_cents || podDetails?.hourly_rate_cents || 0)} />
+                ) : null}
+                {(selectedPod.estimated_cost_cents ?? 0) > 0 && (
+                  <DetailRow label="Estimated charge" value={formatCents(selectedPod.estimated_cost_cents!)} highlight />
+                )}
+                {selectedPod.elapsed_seconds ? (
+                  <DetailRow label="Runtime" value={formatElapsed(selectedPod.elapsed_seconds)} />
+                ) : null}
+                {podDetails?.error && <DetailRow label="Error" value={podDetails.error} error />}
+                {podDetails?.result_url && (
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-text-tertiary">Result</p>
+                    <a href={podDetails.result_url} target="_blank" rel="noopener noreferrer" className="mt-1 block truncate text-xs text-accent-purple hover:underline">
+                      {podDetails.result_url}
+                    </a>
+                  </div>
+                )}
+                <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
+                  <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-text-tertiary">CLI commands</p>
+                  <div className="space-y-2">
+                    <CopyableCode text={`tenxo status ${selectedPod.job_id}`} onCopy={copyCommand} copied={cmdCopied} />
+                    {podDetails?.result_url && (
+                      <CopyableCode text={`tenxo download ${selectedPod.job_id}`} onCopy={copyCommand} copied={cmdCopied} />
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* CLI Deploy Dialog */}
+      {showCLIDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          role="dialog"
+          aria-modal="true"
+          onKeyDown={(e) => e.key === "Escape" && setShowCLIDialog(false)}
+        >
+          <div className="w-full max-w-lg rounded-2xl border border-white/[0.08] bg-[#0c0c0f] p-6 shadow-2xl">
+            <div className="mb-5 flex items-start justify-between">
+              <div>
+                <div className="flex items-center gap-2 text-accent-purple">
+                  <Terminal className="size-4" />
+                  <p className="text-[10px] font-semibold uppercase tracking-widest">CLI Deploy</p>
+                </div>
+                <h2 className="mt-2 text-base font-semibold text-white">
+                  {cliNode?.gpu_model || "Deploy to grid"}
+                </h2>
+                {cliNode && (
+                  <p className="mt-0.5 font-mono text-[11px] text-text-tertiary">{cliNode.node_id}</p>
+                )}
+              </div>
+              <button onClick={() => setShowCLIDialog(false)} className="rounded-lg p-1.5 text-text-tertiary hover:bg-white/[0.06]">
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <div className="mb-5 space-y-3">
+              <p className="text-[12px] text-text-secondary">
+                Deploy from your terminal using the Tenxo CLI. Workloads are end-to-end encrypted.
+              </p>
+              <div className="space-y-2">
+                <p className="text-[11px] font-medium text-text-tertiary">1. Install the CLI</p>
+                <CopyableCode text="pip install tenxo" onCopy={copyCommand} copied={cmdCopied} />
+              </div>
+              <div className="space-y-2">
+                <p className="text-[11px] font-medium text-text-tertiary">2. Configure API</p>
+                <CopyableCode text={`tenxo init --api-url ${API_URL}`} onCopy={copyCommand} copied={cmdCopied} />
+              </div>
+              <div className="space-y-2">
+                <p className="text-[11px] font-medium text-text-tertiary">3. Run your job</p>
+                <CopyableCode
+                  text={cliNode
+                    ? `tenxo run /path/to/workspace --node-id ${cliNode.node_id}`
+                    : "tenxo run /path/to/workspace --node-id <node-id>"}
+                  onCopy={copyCommand}
+                  copied={cmdCopied}
+                />
+              </div>
+              {!cliNode && networkNodes.length === 0 && (
+                <p className="text-[11px] text-amber-400">
+                  No idle GPUs available. Check the marketplace or try again later.
+                </p>
+              )}
+            </div>
+
+            <div className="flex gap-2">
+              <Button variant="secondary" size="sm" className="flex-1" onClick={() => setShowCLIDialog(false)}>
+                Close
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                className="flex-1"
+                onClick={() => {
+                  const cmd = cliNode
+                    ? `tenxo run /path/to/workspace --node-id ${cliNode.node_id}`
+                    : "tenxo run /path/to/workspace";
+                  copyCommand(cmd);
+                  setShowCLIDialog(false);
+                }}
+              >
+                Copy &amp; Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatElapsed(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function DetailRow({ label, value, highlight, error }: { label: string; value: string; highlight?: boolean; error?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-xs text-text-tertiary">{label}</span>
+      <span className={`text-xs font-medium ${error ? "text-red-400" : highlight ? "text-white" : "text-text-secondary"}`}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function CopyableCode({ text, onCopy, copied }: { text: string; onCopy: (t: string) => void; copied: boolean }) {
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2">
+      <code className="break-all font-mono text-[12px] text-text-primary">{text}</code>
+      <button
+        onClick={() => onCopy(text)}
+        className="ml-2 shrink-0 rounded-md p-1 text-text-tertiary hover:bg-white/[0.06] hover:text-text-primary"
+      >
+        {copied ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
+      </button>
     </div>
   );
 }
