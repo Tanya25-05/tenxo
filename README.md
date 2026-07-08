@@ -2,50 +2,6 @@
 
 A distributed GPU compute marketplace with end-to-end encryption. The matchmaker routes **only public keys and salts** — it never sees the AES payload key, the ECDH shared secret, or the plaintext workload. The payload key is additionally **XOR-blinded** with the ECDH shared secret so that intercepting the salt alone is insufficient to derive the key.
 
-## Protocol
-
-```
-Client                        Matchmaker                Agent
-  │                              │                       │
-  │  1. Fetch agent's TEE        │                       │
-  │     attestation + pubkey     │                       │
-  │◄─────────────────────────────│                       │
-  │  2. Verify TEE quote,        │                       │
-  │     generate ephemeral       │                       │
-  │     X25519 keypair           │                       │
-  │  3. Compute ECDH shared      │                       │
-  │     secret (local)           │                       │
-  │  4. HKDF(shared_secret,      │                       │
-  │     salt) → aes_key          │                       │
-  │  5. XOR-blind:               │                       │
-  │     final_key = aes_key      │                       │
-  │               XOR shared_sec │                       │
-  │  6. Encrypt workspace        │                       │
-  │     with final_key           │                       │
-  │  7. Upload encrypted blob    │                       │
-  │──────────────────────────────►                       │
-  │  8. Submit job (salt only)   │                       │
-  │──────────────────────────────►  9. Forward job + salt│
-  │                              │──────────────────────►│
-  │                              │ 10. HKDF + XOR-blind  │
-  │                              │     → same final_key  │
-  │                              │ 11. Download encrypted │
-  │                              │     blob              │
-  │                              │ 12. Decrypt in-memory │
-  │                              │     inside TEE        │
-  │                              │ 13. Write to LUKS2    │
-  │                              │     container (at-rest │
-  │                              │     encryption)       │
-  │                              │ 14. Mount, extract,   │
-  │                              │     run Docker         │
-  │                              │ 15. Re-encrypt result │
-  │                              │     inside TEE        │
-  │                              │ 16. Upload encrypted  │
-  │                              │     result + receipt  │
-  │ 17. Download result + receipt│                       │
-  │◄─────────────────────────────│                       │
-  │ 18. Decrypt + verify hash   │                       │
-```
 
 ### Security properties
 
@@ -103,7 +59,7 @@ tenxo download job-a1b2c3d4
 
 ### Web Dashboard
 
-Sign in at https://tenxo.onrender.com → go to **Developer Console**
+Sign in at https://tenxo.xyz → go to **Developer Console**
 
 - API keys auto-generate on first visit
 - View job history, billing, usage
