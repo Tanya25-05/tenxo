@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { useToast } from "@/components/ui/Toast";
-import { supabase } from "@/lib/supabaseClient";
+import { useAuth, useUser } from "@clerk/nextjs";
 import { API_URL } from "@/lib/api";
 
 const PAYMENT_METHODS = [
@@ -34,8 +34,9 @@ interface Transaction {
 
 export default function BillingPage() {
   const { toast } = useToast();
-  const [session, setSession] = useState<any>(null);
-  const [checkingAuth, setCheckingAuth] = useState(true);
+  const { isLoaded, getToken } = useAuth();
+  const { user } = useUser();
+  const [token, setToken] = useState<string | null>(null);
   const [balance, setBalance] = useState<string | null>(null);
   const [usageHours, setUsageHours] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -47,11 +48,9 @@ export default function BillingPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setCheckingAuth(false);
-    });
-  }, []);
+    if (!isLoaded) return;
+    getToken().then(setToken);
+  }, [isLoaded, getToken]);
 
   useEffect(() => {
     if (typeof window !== "undefined" && !(window as any).Razorpay) {
@@ -63,9 +62,9 @@ export default function BillingPage() {
   }, []);
 
   useEffect(() => {
-    if (!session?.access_token) return;
-    fetchBillingData(session.access_token);
-  }, [session]);
+    if (!token) return;
+    fetchBillingData(token);
+  }, [token]);
 
   const fetchBillingData = async (token: string) => {
     try {
@@ -106,7 +105,7 @@ export default function BillingPage() {
   };
 
   const handleAddPayment = async (method: string) => {
-    if (!session?.access_token) return;
+    if (!token) return;
     setSelectedMethod(method);
     setProcessingPayment(true);
     setError(null);
@@ -114,16 +113,16 @@ export default function BillingPage() {
     try {
       const custRes = await fetch(`${API_URL}/billing/customer`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ user_id: session.user.id, email: session.user.email }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ user_id: user?.id, email: user?.primaryEmailAddress?.emailAddress }),
       });
       const custData = await custRes.json();
       if (!custData.razorpay_customer_id) throw new Error("Failed to create customer");
 
       const setupRes = await fetch(`${API_URL}/billing/setup-intent`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ user_id: session.user.id }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ user_id: user?.id }),
       });
       const setupData = await setupRes.json();
       if (!setupData.order_id) throw new Error("Failed to create setup order");
@@ -135,14 +134,14 @@ export default function BillingPage() {
         name: "Tenxo",
         description: "Verify payment method (₹1, immediately refunded)",
         order_id: setupData.order_id,
-        prefill: { email: session.user.email || "", contact: "" },
+        prefill: { email: user?.primaryEmailAddress?.emailAddress || "", contact: "" },
         theme: { color: "#5E6AD2" },
         handler: async function (response: any) {
           const verifyRes = await fetch(`${API_URL}/billing/verify-payment`, {
             method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
             body: JSON.stringify({
-              user_id: session.user.id,
+              user_id: user?.id,
               razorpay_order_id: response.razorpay_order_id,
               razorpay_payment_id: response.razorpay_payment_id,
               razorpay_signature: response.razorpay_signature,
@@ -151,7 +150,7 @@ export default function BillingPage() {
           if (verifyRes.ok) {
             toast("Payment method added successfully", "success");
             setShowAddPayment(false);
-            fetchBillingData(session.access_token);
+            fetchBillingData(token);
           } else {
             setError(await verifyRes.text());
           }
@@ -174,7 +173,7 @@ export default function BillingPage() {
     }
   };
 
-  if (checkingAuth || !session) {
+  if (!isLoaded || !token) {
     return (
       <div className="grid min-h-screen place-items-center text-sm text-text-secondary">
         Verifying your session...

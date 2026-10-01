@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import Link from "next/link";
+import { useClerk } from "@clerk/nextjs";
 import { Logo } from "@/components/ui/Logo";
 import {
   Activity,
@@ -15,7 +16,6 @@ import {
   Server,
   ShoppingCart,
 } from "lucide-react";
-import { supabase } from "@/lib/supabaseClient";
 import { cn } from "@/lib/utils";
 
 const navItems = [
@@ -28,41 +28,15 @@ const navItems = [
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
   const pathname = usePathname();
-  const [session, setSession] = useState<any>(null);
-  const [checking, setChecking] = useState(true);
+  const { signOut } = useClerk();
   const [isMac, setIsMac] = useState(false);
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setChecking(false);
-      if (!session) router.replace("/");
-    });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, sess) => {
-      setSession(sess);
-      if (!sess) router.replace("/");
-    });
-    return () => subscription.unsubscribe();
-  }, [router]);
 
   useEffect(() => {
     setIsMac(typeof navigator !== "undefined" && navigator.platform.includes("Mac"));
   }, []);
 
-  const handleSignOut = async () => {
-    await supabase.auth.signOut({ scope: "global" });
-    router.replace("/");
-  };
-
-  if (checking || !session) {
-    return (
-      <div className="grid min-h-screen place-items-center text-sm text-text-secondary">
-        Verifying Tenxo session...
-      </div>
-    );
-  }
+  const handleSignOut = () => signOut({ redirectUrl: "/" });
 
   return (
     <div className="flex min-h-screen">

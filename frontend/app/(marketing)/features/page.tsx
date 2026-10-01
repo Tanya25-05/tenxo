@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/Button";
 
 const features = [
   { icon: Cpu, title: "Decentralized GPU pooling", text: "Aggregate idle provider GPUs into one schedulable marketplace for training, fine-tuning, and inference." },
-  { icon: ShieldCheck, title: "Secure by default", text: "Supabase-backed sessions and API keys protect developer requests. Providers authenticate with their account ID." },
+  { icon: ShieldCheck, title: "Secure by default", text: "Clerk-backed sessions and API keys protect developer requests. Providers authenticate with their account ID." },
   { icon: Layers3, title: "Pod orchestration", text: "Launch workloads against live inventory while the Go matchmaker tracks nodes, health, and availability." },
   { icon: Server, title: "Rust edge agent", text: "A lightweight host agent turns NVIDIA machines into secure Tenxo workers with heartbeat-based presence." },
   { icon: Database, title: "Artifact storage", text: "Cloudflare R2-ready workflows keep model artifacts, logs, and outputs outside expensive cloud disks." },

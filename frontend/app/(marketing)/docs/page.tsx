@@ -134,7 +134,7 @@ export default function DocsPage() {
               </div>
               <h3 className="text-sm font-semibold text-white">For developers</h3>
               <p className="mt-2 text-xs leading-relaxed text-text-tertiary">
-                Run AI workloads on the decentralized grid. Sign in with Supabase, get an API key auto-generated,
+                Run AI workloads on the decentralized grid. Sign in with Clerk, get an API key auto-generated,
                 then submit encrypted jobs through the CLI or dashboard.
               </p>
               <a href="#developer-guide" className="mt-4 inline-flex items-center gap-1.5 text-xs font-medium text-accent-purple hover:text-accent-neon">
@@ -180,7 +180,7 @@ export default function DocsPage() {
               </h3>
               <p className="mt-2 text-sm leading-relaxed text-text-tertiary">
                 Visit the <a href="/login" className="text-accent-purple hover:text-accent-neon">Tenxo Console</a> and sign in with
-                Supabase (GitHub or email). Once authenticated, an API key with <code className="rounded bg-white/[0.06] px-1 font-mono text-[11px]">txn_</code> prefix
+                Clerk (Google or email). Once authenticated, an API key with <code className="rounded bg-white/[0.06] px-1 font-mono text-[11px]">txn_</code> prefix
                 is auto-generated for your account.
               </p>
             </div>
@@ -191,7 +191,7 @@ export default function DocsPage() {
                 Create a presigned upload
               </h3>
               <p className="mt-2 text-sm leading-relaxed text-text-tertiary">
-                Use your Supabase JWT or API key to call <code className="rounded bg-white/[0.06] px-1 font-mono text-[11px]">POST /presign</code>.
+                Use your Clerk session token or API key to call <code className="rounded bg-white/[0.06] px-1 font-mono text-[11px]">POST /presign</code>.
                 This returns upload URLs and a server-generated job ID. An encryption key is derived automatically.
               </p>
               <div className="mt-3 rounded-xl border border-white/[0.08] bg-[#0c0c0d] p-4">
@@ -510,7 +510,7 @@ tenxo download job-a1b2c3d4`}</pre>
           </h2>
           <p className="mt-3 max-w-2xl text-sm leading-relaxed text-text-tertiary">
             All authenticated endpoints require a <code className="rounded bg-white/[0.06] px-1 font-mono text-[11px]">Bearer</code> token
-            (Supabase JWT or <code className="rounded bg-white/[0.06] px-1 font-mono text-[11px]">txn_</code> API key) in the
+            (Clerk session token or <code className="rounded bg-white/[0.06] px-1 font-mono text-[11px]">txn_</code> API key) in the
             <code className="rounded bg-white/[0.06] px-1 font-mono text-[11px]"> Authorization</code> header.
           </p>
 
@@ -643,7 +643,7 @@ tenxo download job-a1b2c3d4`}</pre>
             {[
               {
                 q: "Agent won't connect — 'unauthorized' error",
-                a: "Verify your user ID is correct. Find it in the Provider Console after signing in. Provider accounts use your Supabase user ID.",
+                a: "Verify your user ID is correct. Find it in the Provider Console after signing in. Provider accounts use your Tenxo account ID.",
               },
               {
                 q: "Node shows 'unverified' TEE status",

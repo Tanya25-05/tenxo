@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Show, UserButton } from "@clerk/nextjs";
 import { Logo } from "@/components/ui/Logo";
 
 const navLinks = [
@@ -33,18 +34,29 @@ export default function MarketingLayout({ children }: { children: React.ReactNod
           </nav>
 
           <div className="flex items-center gap-3">
-            <Link
-              href="/login"
-              className="rounded-md px-4 py-1.5 text-[13px] font-medium text-text-secondary transition-colors hover:text-text-primary"
-            >
-              Sign in
-            </Link>
-            <Link
-              href="/signup"
-              className="rounded-md bg-zinc-100 px-4 py-1.5 text-[13px] font-medium text-black transition-all hover:bg-white"
-            >
-              Open Console
-            </Link>
+            <Show when="signed-out">
+              <Link
+                href="/login"
+                className="rounded-md px-4 py-1.5 text-[13px] font-medium text-text-secondary transition-colors hover:text-text-primary"
+              >
+                Sign in
+              </Link>
+              <Link
+                href="/signup"
+                className="rounded-md bg-zinc-100 px-4 py-1.5 text-[13px] font-medium text-black transition-all hover:bg-white"
+              >
+                Open Console
+              </Link>
+            </Show>
+            <Show when="signed-in">
+              <Link
+                href="/developer"
+                className="rounded-md px-4 py-1.5 text-[13px] font-medium text-text-secondary transition-colors hover:text-text-primary"
+              >
+                Go to console
+              </Link>
+              <UserButton />
+            </Show>
           </div>
         </div>
       </header>

@@ -12,7 +12,7 @@ import {
   Timer,
   Wallet,
 } from "lucide-react";
-import { supabase } from "@/lib/supabaseClient";
+import { useAuth, useUser } from "@clerk/nextjs";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { useToast } from "@/components/ui/Toast";
@@ -30,8 +30,9 @@ interface Node {
 
 export default function ProviderDashboard() {
   const { toast } = useToast();
-  const [session, setSession] = useState<any>(null);
-  const [checkingAuth, setCheckingAuth] = useState(true);
+  const { isLoaded, getToken } = useAuth();
+  const { user } = useUser();
+  const [token, setToken] = useState<string | null>(null);
   const [myNodes, setMyNodes] = useState<Node[]>([]);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -39,22 +40,20 @@ export default function ProviderDashboard() {
   const [pendingCents, setPendingCents] = useState(0);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setCheckingAuth(false);
-    });
-  }, []);
+    if (!isLoaded) return;
+    getToken().then(setToken);
+  }, [isLoaded, getToken]);
 
   useEffect(() => {
-    if (!session?.access_token) return;
-    fetchMyNodes(session.access_token);
-    fetchEarnings(session.access_token);
+    if (!token) return;
+    fetchMyNodes(token);
+    fetchEarnings(token);
     const timer = setInterval(() => {
-      fetchMyNodes(session.access_token);
-      fetchEarnings(session.access_token);
+      fetchMyNodes(token);
+      fetchEarnings(token);
     }, 10000);
     return () => clearInterval(timer);
-  }, [session?.access_token]);
+  }, [token]);
 
   const fetchEarnings = async (token: string) => {
     try {
@@ -94,7 +93,7 @@ export default function ProviderDashboard() {
     return Math.round(total / myNodes.length);
   }, [myNodes]);
 
-  const userId = session?.user?.id || "";
+  const userId = user?.externalId || user?.id || "";
   const installScript = `curl -fsSL https://tenxo-api.onrender.com/install.sh | bash -s -- --owner ${userId}`;
   const totalVRAM = useMemo(
     () => myNodes.reduce((sum, n) => sum + Number(n.gpu_vram_mb || 0), 0),
@@ -107,7 +106,7 @@ export default function ProviderDashboard() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  if (checkingAuth || !session) {
+  if (!isLoaded || !token) {
     return (
       <div className="grid min-h-screen place-items-center text-sm text-text-tertiary">
         Verifying Tenxo session...
@@ -230,7 +229,7 @@ export default function ProviderDashboard() {
                 Account-bound
               </p>
               <p className="mt-1 text-[11px] text-text-tertiary">
-                Nodes are bound to your Supabase user ID.
+                Nodes are bound to your Tenxo account ID.
               </p>
             </div>
             <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">

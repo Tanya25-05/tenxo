@@ -1,19 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
+import { useUser } from "@clerk/nextjs";
 import { Card } from "@/components/ui/Card";
 
 export default function UserPage() {
-  const [session, setSession] = useState<any>(null);
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, sess) => setSession(sess));
-    return () => subscription?.unsubscribe();
-  }, []);
-
-  const user = session?.user;
+  const { user } = useUser();
 
   return (
     <div className="p-6">
@@ -26,11 +17,11 @@ export default function UserPage() {
           <div className="space-y-4 text-sm">
             <div>
               <span className="text-xs font-medium text-text-tertiary">Email</span>
-              <p className="mt-0.5 text-text-primary">{user?.email || "—"}</p>
+              <p className="mt-0.5 text-text-primary">{user?.primaryEmailAddress?.emailAddress || "—"}</p>
             </div>
             <div>
               <span className="text-xs font-medium text-text-tertiary">User ID</span>
-              <p className="mt-0.5 font-mono text-xs text-text-secondary">{user?.id || "—"}</p>
+              <p className="mt-0.5 font-mono text-xs text-text-secondary">{user?.externalId || user?.id || "—"}</p>
             </div>
           </div>
         </Card>

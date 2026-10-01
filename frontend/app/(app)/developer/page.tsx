@@ -21,7 +21,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { supabase } from "@/lib/supabaseClient";
+import { useAuth } from "@clerk/nextjs";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { useNatsSocket, type JobUpdate } from "@/components/hooks/useNatsSocket";
@@ -81,8 +81,8 @@ interface Metrics {
 const JOBS_PER_PAGE = 10;
 
 export default function DeveloperDashboard() {
-  const [session, setSession] = useState<any>(null);
-  const [checkingAuth, setCheckingAuth] = useState(true);
+  const { isLoaded, getToken } = useAuth();
+  const [token, setToken] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("pods");
   const [pods, setPods] = useState<Pod[]>([]);
   const [metrics, setMetrics] = useState<Metrics | null>(null);
@@ -110,28 +110,26 @@ export default function DeveloperDashboard() {
   const [copyIdx, setCopyIdx] = useState<string | null>(null);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setCheckingAuth(false);
-    });
-  }, []);
+    if (!isLoaded) return;
+    getToken().then(setToken);
+  }, [isLoaded, getToken]);
 
   useEffect(() => {
-    if (!session?.access_token) return;
-    fetchNetworkStatus(session.access_token);
-    fetchPods(session.access_token, jobsPage);
-    fetchAPIKeys(session.access_token);
-    fetchMetrics(session.access_token);
-    fetchBilling(session.access_token);
-    fetchGpuSkus(session.access_token);
+    if (!token) return;
+    fetchNetworkStatus(token);
+    fetchPods(token, jobsPage);
+    fetchAPIKeys(token);
+    fetchMetrics(token);
+    fetchBilling(token);
+    fetchGpuSkus(token);
     const timer = setInterval(() => {
-      fetchNetworkStatus(session.access_token);
-      fetchPods(session.access_token, jobsPage);
-      fetchMetrics(session.access_token);
-      fetchBilling(session.access_token);
+      fetchNetworkStatus(token);
+      fetchPods(token, jobsPage);
+      fetchMetrics(token);
+      fetchBilling(token);
     }, 10000);
     return () => clearInterval(timer);
-  }, [session?.access_token, jobsPage]);
+  }, [token, jobsPage]);
 
   const handleJobUpdate = useCallback((update: JobUpdate) => {
     setPods((current) =>
@@ -142,13 +140,12 @@ export default function DeveloperDashboard() {
       ),
     );
     if (update.status === "done" || update.status === "error" || update.status === "failed") {
-      const token = session?.access_token;
       if (token) fetchBilling(token);
     }
-  }, [session?.access_token]);
+  }, [token]);
 
   const { status: socketStatus } = useNatsSocket({
-    token: session?.access_token,
+    token: token ?? undefined,
     onJobUpdate: handleJobUpdate,
   });
 
@@ -204,7 +201,7 @@ export default function DeveloperDashboard() {
     setDetailsLoading(true);
     try {
       const res = await fetch(`${API_URL}/jobs/${pod.job_id}`, {
-        headers: { Authorization: `Bearer ${session?.access_token}` },
+        headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         setPodDetails(await res.json());
@@ -302,12 +299,12 @@ export default function DeveloperDashboard() {
   }, [meterSeconds]);
 
   const handleCopyToken = () => {
-    navigator.clipboard.writeText(session?.access_token || "");
+    navigator.clipboard.writeText(token || "");
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
   };
 
-  if (checkingAuth || !session) {
+  if (!isLoaded || !token) {
     return (
       <div className="grid min-h-screen place-items-center text-sm   text-text-tertiary">
         Verifying Tenxo session...
@@ -658,7 +655,7 @@ export default function DeveloperDashboard() {
                 </p>
                 <h2 className="mt-1 text-lg font-semibold text-white">Bearer token</h2>
                 <p className="mt-2 text-xs   text-text-tertiary">
-                  Use this Supabase JWT with the CLI and matchmaker-protected API routes.
+                  Use this Clerk session token with the CLI and matchmaker-protected API routes.
                 </p>
               </div>
               <div className="flex size-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03]">
@@ -671,7 +668,7 @@ export default function DeveloperDashboard() {
             <input
               type="password"
               readOnly
-              value={session.access_token}
+              value={token}
               aria-label="API Bearer Token"
               className="mb-4 w-full rounded-lg border border-white/[0.08] bg-black/40 px-4 py-2.5 font-mono text-xs text-text-secondary outline-none focus:border-white/20"
             />
@@ -719,7 +716,7 @@ export default function DeveloperDashboard() {
             )}
 
             {/* Key list */}
-            <APIKeyList token={session.access_token} />
+            <APIKeyList token={token} />
           </section>
         </div>
       )}

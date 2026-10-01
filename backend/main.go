@@ -172,9 +172,9 @@ func main() {
 		log.Fatalf("could not ensure JetStream stream: %v", err)
 	}
 
-	// JWKS (Supabase) - optional
+	// JWKS (Clerk) - optional
 	var jwks keyfunc.Keyfunc
-	jwksURL := os.Getenv("SUPABASE_JWKS_URL")
+	jwksURL := os.Getenv("CLERK_JWKS_URL")
 	if jwksURL != "" {
 		log.Printf("Loading JWKS from %s", jwksURL)
 		var err error
@@ -184,7 +184,7 @@ func main() {
 			jwks = nil
 		}
 	} else {
-		log.Printf("SUPABASE_JWKS_URL not set; JWT verification disabled")
+		log.Printf("CLERK_JWKS_URL not set; JWT verification disabled")
 	}
 
 	paymentHandler := payment.NewBillingHandler(st)
@@ -626,7 +626,7 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func cors(next http.HandlerFunc) http.HandlerFunc {
-	allowedOrigins := getEnv("ALLOWED_ORIGINS", "https://tenxer.onrender.com")
+	allowedOrigins := getEnv("ALLOWED_ORIGINS", "https://tenxo.xyz")
 	origins := strings.Split(allowedOrigins, ",")
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -1208,7 +1208,7 @@ var signalStore *signaling.SessionStore
 var signalRateLimiter *RateLimiter
 
 func initSignaling() {
-	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxer.onrender.com")
+	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxo.xyz")
 	signalStore = signaling.NewSessionStore(allowedOrigin)
 	// 30 session creation requests per minute per IP
 	signalRateLimiter = NewRateLimiter(30, time.Minute)
@@ -1320,7 +1320,7 @@ func (s *Server) validateAuth(token string) (userID, newAPIKey string, err error
 		return uid, "", nil
 	}
 
-	// Try JWT (Supabase auth)
+	// Try JWT (Clerk auth)
 	if s.jwks != nil {
 		t, err := s.parseAndValidateToken(token)
 		if err != nil {
@@ -1331,17 +1331,23 @@ func (s *Server) validateAuth(token string) (userID, newAPIKey string, err error
 			if !ok {
 				return "", "", errors.New("sub claim missing in token")
 			}
+			// Prefer external_id, set on users migrated from the legacy Supabase auth
+			// system, so their pre-existing jobs/nodes/billing rows keep resolving.
+			userID := sub
+			if extID, ok := claims["external_id"].(string); ok && extID != "" {
+				userID = extID
+			}
 			// Auto-generate API key on first auth
-			existing, listErr := s.st.ListAPIKeys(ctx, sub)
+			existing, listErr := s.st.ListAPIKeys(ctx, userID)
 			if listErr == nil && len(existing) == 0 {
 				rawKey, keyHash, genErr := generateAPIKey()
 				if genErr == nil {
-					if createErr := s.st.CreateAPIKey(ctx, keyHash, sub, "auto-generated", "developer", nil); createErr == nil {
-						return sub, rawKey, nil
+					if createErr := s.st.CreateAPIKey(ctx, keyHash, userID, "auto-generated", "developer", nil); createErr == nil {
+						return userID, rawKey, nil
 					}
 				}
 			}
-			return sub, "", nil
+			return userID, "", nil
 		}
 		return "", "", errors.New("sub claim missing in token")
 	}
@@ -1935,7 +1941,7 @@ func (s *Server) sendWS(userID, payload string) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxer.onrender.com")
+	allowedOrigin := getEnv("ALLOWED_ORIGINS", "https://tenxo.xyz")
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")

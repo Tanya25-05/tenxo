@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import Script from "next/script";
+import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 import { ClientShell } from "./client-shell";
 
@@ -9,7 +10,7 @@ const inter = Inter({ subsets: ["latin"] });
 const siteUrl = "https://tenxo.ai";
 
 export const metadata: Metadata = {
-  title: "Tenxo — Decentralized GPU Infrastructure",
+  title: "Tenxo: Decentralized GPU Infrastructure",
   description:
     "Decentralized GPU compute secured by TEE. Deploy AI workloads on idle GPUs across a zero-trust peer-to-peer grid at up to 50% less than centralized clouds.",
   metadataBase: new URL(siteUrl),
@@ -56,18 +57,20 @@ const jsonLd = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={inter.className}>
-      <head>
-        <link rel="canonical" href={siteUrl} />
-      </head>
-      <Script
-        id="schema-jsonld"
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
-      />
-      <body className="min-h-screen bg-background text-text-primary antialiased">
-        <ClientShell>{children}</ClientShell>
-      </body>
-    </html>
+    <ClerkProvider signInUrl="/login" signUpUrl="/signup" afterSignOutUrl="/">
+      <html lang="en" className={inter.className}>
+        <head>
+          <link rel="canonical" href={siteUrl} />
+        </head>
+        <Script
+          id="schema-jsonld"
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        />
+        <body className="min-h-screen bg-background text-text-primary antialiased">
+          <ClientShell>{children}</ClientShell>
+        </body>
+      </html>
+    </ClerkProvider>
   );
 }

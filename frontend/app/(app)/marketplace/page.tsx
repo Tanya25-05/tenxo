@@ -22,7 +22,7 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { useToast } from "@/components/ui/Toast";
 import { useNatsSocket, type JobUpdate } from "@/components/hooks/useNatsSocket";
-import { supabase } from "@/lib/supabaseClient";
+import { useAuth, useUser } from "@clerk/nextjs";
 import { API_URL } from "@/lib/api";
 
 interface GpuNode {
@@ -55,10 +55,11 @@ const REGIONS = ["us-east", "us-west", "eu-west", "eu-central", "ap-south", "ap-
 
 export default function MarketplacePage() {
   const { toast } = useToast();
-  const [session, setSession] = useState<any>(null);
-  const sessionRef = useRef(session);
-  sessionRef.current = session;
-  const [checkingAuth, setCheckingAuth] = useState(true);
+  const { isLoaded, getToken } = useAuth();
+  const { user } = useUser();
+  const [token, setToken] = useState<string | null>(null);
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
   const [nodes, setNodes] = useState<GpuNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedNode, setSelectedNode] = useState<GpuNode | null>(null);
@@ -72,20 +73,18 @@ export default function MarketplacePage() {
   const [selectedRegions, setSelectedRegions] = useState<string[]>([]);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setCheckingAuth(false);
-    });
-  }, []);
+    if (!isLoaded) return;
+    getToken().then(setToken);
+  }, [isLoaded, getToken]);
 
   useEffect(() => {
-    if (!session?.access_token) return;
+    if (!token) return;
     const ac = new AbortController();
     async function fetchNodes() {
       try {
         const res = await fetch(`${API_URL}/nodes`, {
           signal: ac.signal,
-          headers: { Authorization: `Bearer ${session.access_token}` },
+          headers: { Authorization: `Bearer ${token}` },
         });
         if (res.ok) {
           const data = await res.json();
@@ -102,18 +101,18 @@ export default function MarketplacePage() {
     }
     fetchNodes();
     return () => ac.abort();
-  }, [session?.access_token]);
+  }, [token]);
 
   const trackUsage = async (jobId: string, action: "start" | "stop") => {
-    if (!session?.access_token) return;
+    if (!token) return;
     try {
       await fetch(`${API_URL}/billing/track-usage`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ user_id: session.user.id, job_id: jobId, action }),
+        body: JSON.stringify({ user_id: user?.id, job_id: jobId, action }),
       });
     } catch {
       // silent — billing is best-effort
@@ -121,14 +120,14 @@ export default function MarketplacePage() {
   };
 
   const handleJobUpdate = useCallback((update: JobUpdate) => {
-    const tok = sessionRef.current?.access_token;
+    const tok = tokenRef.current;
     if (update.status === "done") {
       toast(`Job ${update.job_id.slice(0, 12)}... completed`, "success");
       if (tok) {
         fetch(`${API_URL}/billing/track-usage`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
-          body: JSON.stringify({ user_id: sessionRef.current?.user.id, job_id: update.job_id, action: "stop" }),
+          body: JSON.stringify({ user_id: user?.id, job_id: update.job_id, action: "stop" }),
         }).catch(() => {});
       }
     } else if (update.status === "error") {
@@ -137,14 +136,14 @@ export default function MarketplacePage() {
         fetch(`${API_URL}/billing/track-usage`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
-          body: JSON.stringify({ user_id: sessionRef.current?.user.id, job_id: update.job_id, action: "stop" }),
+          body: JSON.stringify({ user_id: user?.id, job_id: update.job_id, action: "stop" }),
         }).catch(() => {});
       }
     }
-  }, [toast]);
+  }, [toast, user?.id]);
 
   const { status: wsStatus } = useNatsSocket({
-    token: session?.access_token,
+    token: token ?? undefined,
     onJobUpdate: handleJobUpdate,
   });
 
@@ -161,7 +160,7 @@ export default function MarketplacePage() {
   }, [nodes, searchQuery, selectedModels, teeOnly, maxPrice, selectedRegions]);
 
   const handleDeploy = async (node: GpuNode) => {
-    if (!session?.access_token) {
+    if (!token) {
       toast("Sign in to deploy", "error");
       return;
     }
@@ -184,7 +183,7 @@ export default function MarketplacePage() {
     setter(field.includes(value) ? field.filter((f) => f !== value) : [...field, value]);
   };
 
-  if (checkingAuth) {
+  if (!isLoaded || !token) {
     return (
       <div className="grid min-h-screen place-items-center text-sm text-text-secondary">
         Verifying session...
